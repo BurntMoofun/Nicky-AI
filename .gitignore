@@ -1,0 +1,37 @@
+# Personal data — never share these
+nicky_data/
+
+# Your hype music
+hype.mp3
+hype.wav
+Hype
+Hype.wav
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.iml
+.compass/
+
+# Test/debug scripts
+inspect_wav.py
+quick_test.py
+run_tests.py
+run_three_tests.py
+run_nicky_test.py
+nicky_test_runner.py
+test_audio.py
+test_features.py
+verify_syntax.py
+
+# OS
+.DS_Store
+Thumbs.db
