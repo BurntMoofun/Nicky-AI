@@ -136,7 +136,7 @@ nicky-ai/
 ---
 
 ## 🎬 Demo
-*[Add your demo video link here after recording]*
+*[none]*
 
 ---
 
