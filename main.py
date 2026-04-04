@@ -1,34 +1,11 @@
-import random
-from datetime import datetime
-import json
-import os
+import sys
+from chatbot import Chatbot
 
-try:
-    import pyttsx3
-    import speech_recognition as sr  # noqa: F401
-    import wikipedia
-    import matplotlib.pyplot as plt
-    from sentence_transformers import SentenceTransformer
-    import numpy as np
-except ImportError as _e:
-    print(f"Warning: Some libraries not installed. Run: pip install -r requirements.txt ({_e})")
-    pyttsx3 = None
-    sr = None
-    wikipedia = None
-    plt = None
-    SentenceTransformer = None
-    np = None
+if __name__ == "__main__":
+    chatbot = Chatbot()
+    chatbot.chat()
+    sys.exit(0)
 
-try:
-    from ddgs import DDGS
-except ImportError:
-    try:
-        from duckduckgo_search import DDGS
-    except ImportError:
-        DDGS = None
-
-
-class OllamaClient:
     """Local LLM via Ollama — streaming, memory-aware answers for Nicky."""
 
     DEFAULT_MODEL = "llama3.2"
@@ -147,8 +124,8 @@ class GeminiClient:
                     self.api_key = key
                     self.available = True
                     print(f"[Nicky AI] Gemini connected — model: {self.MODEL}")
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[Nicky] Warning: could not load Gemini key: {e}")
 
     def set_key(self, key):
         """Save and activate a Gemini API key."""
@@ -205,7 +182,10 @@ class GeminiClient:
                         break
                     try:
                         chunk = json.loads(json_str)
-                        token = (chunk.get("candidates", [{}])[0]
+                        candidates = chunk.get("candidates", [])
+                        if not candidates:
+                            continue
+                        token = (candidates[0]
                                  .get("content", {})
                                  .get("parts", [{}])[0]
                                  .get("text", ""))
@@ -311,8 +291,8 @@ class KnowledgeBase:
             # Fall back to first result, still trimmed
             if results:
                 return self._trim_to_sentences(results[0].get("body", ""), max_sentences=3)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[Nicky] Warning: DuckDuckGo search failed: {e}")
         return None
 
     @staticmethod
@@ -382,18 +362,16 @@ class KnowledgeBase:
     def _persist(self):
         """Write facts to disk immediately after learning."""
         try:
-            import os, json
             path = os.path.join("nicky_data", "knowledge_base.json")
             os.makedirs("nicky_data", exist_ok=True)
             with open(path, "w") as f:
                 json.dump(self.facts, f, indent=2)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[Nicky] Warning: could not persist knowledge base: {e}")
 
     def load_from_disk(self):
         """Load previously saved facts from disk into memory."""
         try:
-            import os, json
             path = os.path.join("nicky_data", "knowledge_base.json")
             if os.path.exists(path):
                 with open(path) as f:
@@ -715,9 +693,9 @@ class Environment:
         return False
     
     def find_object(self, name):
-        """Find and return an object"""
+        """Find and return an object by exact name match."""
         for obj in self.objects:
-            if name.lower() in obj["name"].lower():
+            if name.lower() == obj["name"].lower():
                 return obj
         return None
 
@@ -1031,6 +1009,9 @@ class NLUEngine:
         if self.model is None or not self._model_ready:
             return self._keyword_fallback(text)
 
+        if not self._all_labels:
+            return "unknown", 0.0
+
         vec = self.model.encode([text.lower()], convert_to_numpy=True)
         num = self._np.dot(self._embeddings, vec.T).flatten()
         denom = self._np.linalg.norm(self._embeddings, axis=1) * self._np.linalg.norm(vec) + 1e-8
@@ -1129,48 +1110,47 @@ class UserMemory:
         found = {}
 
         # "my name is X"
-        m = re.search(r"my name is ([a-z]+)", t)
+        m = re.search(r"my name is ([a-z]+)", t, re.IGNORECASE)
         if m:
             found["name"] = m.group(1).capitalize()
 
         # "i am X" / "i'm X" (job/description)
-        m = re.search(r"i(?:'m| am) (?:a |an )?([a-z]+ ?[a-z]*)", t)
+        m = re.search(r"i(?:'m| am) (?:a |an )?([a-z]+ ?[a-z]*)", t, re.IGNORECASE)
         if m and m.group(1) not in ("fine", "good", "okay", "ok", "here", "back", "not",
                                     "going", "trying", "just", "also", "still", "really"):
             found["description"] = m.group(1).strip()
 
         # "i am X years old"
-        m = re.search(r"i(?:'m| am) (\d+)(?: years old)?", t)
+        m = re.search(r"i(?:'m| am) (\d+)(?: years old)?", t, re.IGNORECASE)
         if m:
             found["age"] = m.group(1)
 
         # "i live in X" / "i'm from X" / "i'm in X"
-        m = re.search(r"i(?:'m| am) (?:from|in) ([a-z][\w ]{2,25})", t)
+        m = re.search(r"i(?:'m| am) (?:from|in) ([a-z][\w ]{2,25})", t, re.IGNORECASE)
         if not m:
-            m = re.search(r"i live in ([a-z][\w ]{2,25})", t)
+            m = re.search(r"i live in ([a-z][\w ]{2,25})", t, re.IGNORECASE)
         if m:
             found["location"] = m.group(1).strip().title()
 
         # "i'm building X" / "i'm working on X" / "my project is X"
-        m = re.search(r"(?:i(?:'m| am) (?:building|working on|creating|making)|my project is) ([a-z][\w ]{2,40})", t)
+        m = re.search(r"(?:i(?:'m| am) (?:building|working on|creating|making)|my project is) ([a-z][\w ]{2,40})", t, re.IGNORECASE)
         if m:
             found["project"] = m.group(1).strip()
 
         # "i like/love X"
-        m = re.search(r"i (?:like|love|enjoy|prefer) ([a-z][\w ]{2,30})", t)
+        m = re.search(r"i (?:like|love|enjoy|prefer) ([a-z][\w ]{2,30})", t, re.IGNORECASE)
         if m:
             found["likes"] = [m.group(1).strip()]
 
         # "i hate/dislike X"
-        m = re.search(r"i (?:hate|dislike|don't like|cant stand) ([a-z][\w ]{2,30})", t)
+        m = re.search(r"i (?:hate|dislike|don't like|cant stand) ([a-z][\w ]{2,30})", t, re.IGNORECASE)
         if m:
             found["dislikes"] = [m.group(1).strip()]
 
         # "i play X" / "my hobby is X"
-        m = re.search(r"(?:i play|my hobby is|i spend time) ([a-z][\w ]{2,30})", t)
+        m = re.search(r"(?:i play|my hobby is|i spend time) ([a-z][\w ]{2,30})", t, re.IGNORECASE)
         if m:
-            found.setdefault("hobbies", [])
-            found["hobbies"] = [m.group(1).strip()]
+            found.setdefault("hobbies", []).append(m.group(1).strip())
 
         for key, value in found.items():
             self.learn(key, value)
@@ -2694,6 +2674,14 @@ class Chatbot:
         )
         if any(t in text_lower for t in _FULL_OUTPUT_TRIGGERS):
             return self._cmd_full_output(text_lower, prefix)
+
+        # In 100% Output mode — only arm commands are accepted
+        if self._full_output:
+            intent, _ = self.nlu.predict(text_lower)
+            if intent in self._ARM_INTENTS:
+                return self._dispatch(intent, text, text_lower, prefix)
+            return self.respond(f"{prefix}⚡ 100% Output mode — arm commands only. Say 'stop output' to exit.")
+
         if any(text_lower == t or t in text_lower for t in _CASUAL_MODE_TRIGGERS):
             self.mode = "casual"
             return self.respond(
@@ -2908,10 +2896,16 @@ class Chatbot:
             "100%", "100 percent", "full output", "aura mode", "hype mode",
             "flex mode", "max output", "stop output", "stop hype",
         )
+        # Keywords that must always route through NLU/commands, never casual chat
+        _FORCE_CMD_WORDS = frozenset((
+            "move", "grab", "release", "add", "list", "scan",
+            "find", "save", "load", "visualize", "plot",
+        ))
         is_casual = (
             any(text_lower.startswith(s) for s in _CASUAL_STARTERS)
             or (len(text_lower.split()) <= 3
-                and not any(text_lower.startswith(c) for c in _COMMAND_STARTERS))
+                and not any(text_lower.startswith(c) for c in _COMMAND_STARTERS)
+                and not any(w in _FORCE_CMD_WORDS for w in text_lower.split()))
         )
         if is_casual:
             result = self._ask_llm(
@@ -3005,7 +2999,7 @@ class Chatbot:
 
         # Environment management
         elif intent == "add_object":
-            return self.respond("Format: 'add [name] at [distance]cm [angle]degrees'  e.g. 'add ball at 50cm 0degrees'")
+            return self._cmd_add_object(text)
         elif intent == "remove_object":
             return self._cmd_remove_object(text, prefix)
         elif intent == "clear_env":
@@ -3036,7 +3030,15 @@ class Chatbot:
             self.arm_state = {"position": "neutral", "gripper": "open", "holding": None}
             return self.respond(f"{prefix}System reset. Arm returned to neutral position.")
         elif intent == "sequence":
-            return self.respond(f"{prefix}Running automated routine: raising arm, gripping, moving left.")
+            import threading as _t, time as _time
+            steps = ["up", "forward", "left", "neutral"]
+            def _run_seq():
+                for step in steps:
+                    self.arm_state["position"] = step
+                    _time.sleep(0.5)
+            _t.Thread(target=_run_seq, daemon=True).start()
+            seq_str = " → ".join(steps)
+            return self.respond(f"{prefix}Running sequence: {seq_str}.")
         elif intent == "throw":
             return self._cmd_throw(text, prefix)
 
@@ -3200,6 +3202,8 @@ class Chatbot:
     def _cmd_add_object(self, text):
         try:
             parts = text.replace("add ", "").split(" at ")
+            if len(parts) < 2:
+                raise ValueError("Missing ' at ' separator")
             obj_name = parts[0].strip()
             coords = parts[1].strip()
             if "cm" in coords and "degrees" in coords:
@@ -3208,7 +3212,7 @@ class Chatbot:
                 result = self.environment.add_object(obj_name, int(dist_str), int(angle_str))
                 self._save_data()
                 return self.respond(result)
-        except Exception:
+        except (ValueError, IndexError):
             pass
         return self.respond("Format: 'add [name] at [distance]cm [angle]degrees'  e.g. 'add ball at 50cm 0degrees'")
 
@@ -3231,6 +3235,8 @@ class Chatbot:
         if len(parts) == 2:
             question = f"what is {parts[0].strip()}"
             answer = parts[1].strip()
+            if not answer:
+                return self.respond(f"{prefix}What should I learn about that? Provide a value after 'is'.")
             result = self.knowledge.learn_fact(question, answer)
             self._save_data()
             return self.respond(f"{prefix}{result}")
@@ -3917,16 +3923,6 @@ class Chatbot:
 
         # --- SET TIMER: parse "set a timer for X minutes/seconds" ---
         import re
-        patterns = [
-            r'(\d+)\s*hour[s]?\s*(\d+)\s*minute[s]?',
-            r'(\d+)\s*hour[s]?',
-            r'(\d+)\s*minute[s]?\s*(\d+)\s*second[s]?',
-            r'(\d+)\s*minute[s]?',
-            r'(\d+)\s*second[s]?',
-            r'(\d+)\s*min',
-            r'(\d+)\s*sec',
-            r'(\d+)\s*hr',
-        ]
         total_seconds = 0
         matched = False
         m = re.search(r'(\d+)\s*hour[s]?\s*(\d+)\s*minute[s]?', t)
@@ -4021,9 +4017,6 @@ class Chatbot:
                 return self.respond(f"{prefix}📝 Added to your list: \"{item}\"")
 
         # DONE / COMPLETE: "done with buy milk" / "mark buy milk as done" / "complete buy milk"
-        done_patterns = [
-            r'(?:done with|mark (.+?) (?:as )?done|complete[d]? (.+)|finished (.+)|crossed off (.+))',
-        ]
         m = re.search(r'(?:done with|complete[d]?|finished|crossed off|mark)\s+(.+?)(?:\s+as done)?$', t)
         if m:
             keyword = m.group(1).strip()
@@ -4216,7 +4209,7 @@ class Chatbot:
     def _cmd_memory(self, prefix=""):
         if self.conversation_history:
             count = len(self.conversation_history)
-            recent = [h["user"] for h in self.conversation_history[-5:]]
+            recent = [h.get("user", "") for h in self.conversation_history[-5:] if h.get("user")]
             return self.respond(f"{prefix}I remember {count} interactions. Recent: {', '.join(recent)}")
         return self.respond(f"{prefix}No conversation history yet.")
 
