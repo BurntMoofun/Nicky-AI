@@ -1225,7 +1225,7 @@ class Chatbot:
         wake_status   = " 👂ON" if (wake_detector and wake_detector.is_active) else ""
         mode_label    = "💬 Casual" if self.mode == "casual" else ("🔧 Workshop" if self.mode != "100%" else "💯 100%")
         return self.respond(
-            f"{prefix}━━━━━━━━━━━━━━━  Nicky AI — All Commands  ━━━━━━━━━━━━━━━\n"
+            f"{prefix}━━━━━━━━━━━━━━━  Nicky AI V2 — All Commands  ━━━━━━━━━━━━━━━\n"
             "\n🦾 ARM CONTROL\n"
             "  move left/right/up/down/forward/back/neutral\n"
             "  grab [object]  |  release  |  throw [object]\n"
@@ -1244,6 +1244,7 @@ class Chatbot:
             "  delete event [id]\n"
             "\n🌤️ WEATHER & NEWS\n"
             "  weather in [city]\n"
+            "  weather forecast for [city]     — 3-day forecast\n"
             "  what's in the news  |  news about [topic]\n"
             "\n🧠 KNOWLEDGE & MEMORY\n"
             "  learn that [X] is [Y]\n"
@@ -1256,6 +1257,7 @@ class Chatbot:
             "  what do you know        — same as show knowledge\n"
             "  show profile            — what Nicky knows about you\n"
             "  search history [term]   — search past conversations\n"
+            "  export chat history     — saves .txt to Desktop\n"
             "  what is my name  |  what is my occupation\n"
             "\n😄 PERSONALITY\n"
             f"  roast mode{roast_status}  |  stop roasting\n"
@@ -1269,31 +1271,35 @@ class Chatbot:
             "\n📝 PRODUCTIVITY\n"
             "  add to my list: [task]  |  read my list  |  mark as done [task]\n"
             "  set a timer for [5 minutes]  |  start stopwatch  |  stop stopwatch\n"
+            "  take a note: [text]     |  read my notes  |  delete note [n]\n"
             "  calculate [expression]  |  15% of 200\n"
             "\n💻 TOOLS\n"
             "  translate [text] to [language]\n"
+            "  convert 100 km to miles  |  30 celsius to fahrenheit  |  10 kg to lbs\n"
+            "    (supports: length, weight, temperature, volume, speed)\n"
             "  tell me a story about [topic]\n"
             "  quiz me on [topic]\n"
             "  write a function that [does X]  |  debug this code\n"
+            "  tell me a joke  |  tell me a programming joke  |  tell me a dad joke\n"
+            "  fun fact  |  fun fact about [space/animals/history/science/tech]\n"
             "  volume up/down  |  mute  |  set volume to 70\n"
             "  open [app]  |  screenshot\n"
-            "\n⚙️ SYSTEM\n"
+            "  copy [text] to clipboard  |  read my clipboard\n"
+            "  generate a password  |  generate a 20 character password\n"
+            "\n🎲 RANDOM\n"
+            "  roll a dice  |  roll 2d20  |  roll [N]d[sides]\n"
+            "  flip a coin\n"
+            "  random number between [X] and [Y]\n"
+            "  random color\n"
+            "\n🖥️ SYSTEM INFO\n"
+            "  system info             — CPU, RAM, disk, battery all at once\n"
+            "  cpu usage  |  ram usage  |  disk space  |  battery level\n"
+            "  what is my IP  |  am I online\n"
+            "  what time is it in [city]  — world clock\n"
+            "\n⚙️ SETTINGS\n"
             "  casual mode  |  workshop mode  |  100% output\n"
             "  use gemini  |  use ollama  |  use auto\n"
             "  save  |  load  |  reset  |  quit\n"
-            "\n🆕 V2 NEW COMMANDS\n"
-            "  convert 100 km to miles  |  30 celsius to fahrenheit  |  10 kg to lbs\n"
-            "  system info  |  cpu usage  |  battery level  |  disk space\n"
-            "  take a note: [text]  |  read my notes  |  delete note 1\n"
-            "  copy [text] to clipboard  |  read my clipboard\n"
-            "  roll a dice  |  roll 2d20  |  flip a coin  |  random number 1-100\n"
-            "  random color  |  generate a password  |  generate a 20 character password\n"
-            "  what time is it in Tokyo  |  current time in London\n"
-            "  what is my IP  |  am I online\n"
-            "  weather forecast for London\n"
-            "  export chat history\n"
-            "  tell me a programming joke  |  tell me a dad joke\n"
-            "  fun fact about space  |  fun fact about animals\n"
             f"  ─── mode: {mode_label}   brain: {self.llm_backend} ───"
         )
 
@@ -2294,6 +2300,11 @@ class Chatbot:
                     print(response)
                 if self.voice.voice_enabled:
                     text_to_speak = self._last_streamed_text if not response else response.replace(f"[{self.name}] ", "")
+                    # Don't read out huge list responses — summarize them instead
+                    _VOICE_MAX_CHARS = 300
+                    _VOICE_SKIP_HEADERS = ("━━━", "ARM CONTROL", "VOICE &", "YOUTUBE", "CALENDAR", "WEATHER", "KNOWLEDGE", "PERSONALITY", "GAMES", "PRODUCTIVITY", "TOOLS", "RANDOM", "SYSTEM INFO", "SETTINGS")
+                    if text_to_speak and (len(text_to_speak) > _VOICE_MAX_CHARS or any(h in text_to_speak for h in _VOICE_SKIP_HEADERS)):
+                        text_to_speak = "Commands displayed on screen. Check the text above."
                     if text_to_speak:
                         print("[🔊 Speaking...]", end="\r", flush=True)
                         self.voice.speak(text_to_speak)
