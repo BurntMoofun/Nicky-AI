@@ -17,6 +17,18 @@ except ImportError:
 
 # Knowledge Base System
 class KnowledgeBase:
+
+    # Keyword-based category classifier
+    _CATEGORIES = {
+        "robotics":    ["robot", "arm", "servo", "motor", "gripper", "sensor", "actuator", "workspace", "degree", "freedom", "robotic"],
+        "programming": ["python", "code", "algorithm", "function", "variable", "loop", "class", "api", "software", "script", "debug", "compile", "programming", "coding"],
+        "science":     ["physics", "chemistry", "biology", "math", "formula", "equation", "atom", "energy", "force", "quantum", "gravity", "science"],
+        "ai":          ["artificial intelligence", "machine learning", "neural", "deep learning", "model", "training", "inference", "llm", "gpt", " ai "],
+    }
+
+    # Confidence by source
+    _SOURCE_CONFIDENCE = {"user": 1.0, "Wiki": 0.8, "DDG": 0.6, "": 0.9}
+
     def __init__(self):
         self.facts = {
             "what is python": "Python is a popular programming language used for web development, data science, and automation.",
@@ -41,8 +53,27 @@ class KnowledgeBase:
         question_lower = question.lower().strip()
         for key, value in self.facts.items():
             if key in question_lower or question_lower in key:
-                return value
+                return self._fact_answer(value)
         return None
+
+    # ── Fact accessor helpers (support both old str and new dict format) ──
+
+    def _fact_answer(self, val):
+        return val.get("answer", "") if isinstance(val, dict) else (val or "")
+
+    def _fact_confidence(self, val):
+        return val.get("confidence", 1.0) if isinstance(val, dict) else 1.0
+
+    def _fact_category(self, val):
+        return val.get("category", "general") if isinstance(val, dict) else "general"
+
+    def _categorize(self, key, answer):
+        """Classify a fact into a category based on keywords."""
+        text = (key + " " + answer).lower()
+        for cat, keywords in self._CATEGORIES.items():
+            if any(kw in text for kw in keywords):
+                return cat
+        return "general"
     
     def search_wikipedia(self, query):
         """Search Wikipedia for an answer"""
@@ -96,10 +127,15 @@ class KnowledgeBase:
 
     def answer_question(self, question):
         """Try to answer using: knowledge base → DuckDuckGo → Wikipedia. Auto-saves new findings."""
-        # 1. Local knowledge base
-        answer = self.lookup(question)
-        if answer:
-            return answer
+        # 1. Local knowledge base — return highest-confidence answer if multiple matches
+        matches = []
+        q_lower = question.lower().strip()
+        for key, val in self.facts.items():
+            if key in q_lower or q_lower in key:
+                matches.append((self._fact_confidence(val), self._fact_answer(val)))
+        if matches:
+            matches.sort(reverse=True)
+            return matches[0][1]
 
         # 2. DuckDuckGo
         answer = self.search_duckduckgo(question)
@@ -128,17 +164,26 @@ class KnowledgeBase:
         return re.sub(r'\s+', ' ', key).strip()
 
     def _auto_store(self, question, answer, source=""):
-        """Save a learned fact from search into the persistent knowledge base."""
+        """Save a learned fact from search into the persistent knowledge base with metadata."""
         key = self._normalize_key(question)
-        if not key or key in self.facts:
-            return  # already known — don't overwrite manual facts
-        self.facts[key] = answer
-        # Also store under the full question form for wider matching
+        if not key:
+            return
+        # Don't overwrite a higher-confidence existing fact
+        existing = self.facts.get(key)
+        if existing:
+            existing_conf = self._fact_confidence(existing)
+            new_conf = self._SOURCE_CONFIDENCE.get(source, 0.6)
+            if existing_conf >= new_conf:
+                return
+        confidence = self._SOURCE_CONFIDENCE.get(source, 0.6)
+        category = self._categorize(key, answer)
+        fact_entry = {"answer": answer, "source": source, "confidence": confidence, "category": category}
+        self.facts[key] = fact_entry
         full_key = question.lower().strip().rstrip("?.!")
         if full_key != key:
-            self.facts[full_key] = answer
+            self.facts[full_key] = fact_entry
         if source:
-            print(f"[Nicky] 🧠 Stored from {source}: \"{key}\"")
+            print(f"[Nicky] 🧠 Stored from {source} [{category}]: \"{key}\"")
         self._persist()
 
     def _persist(self):
@@ -168,14 +213,16 @@ class KnowledgeBase:
         conflict = self._check_contradiction(question_lower, answer)
         if conflict:
             return f"⚠️ I already know something different about that: \"{conflict}\". Say 'override: {question}' to update it."
-        self.facts[question_lower] = answer
+        category = self._categorize(question_lower, answer)
+        self.facts[question_lower] = {"answer": answer, "source": "user", "confidence": 1.0, "category": category}
         self._persist()
         return f"Learned: {question_lower} -> {answer}"
 
     def override_fact(self, question, answer):
         """Force-overwrite a fact even if a contradiction exists."""
         key = question.lower().strip()
-        self.facts[key] = answer
+        category = self._categorize(key, answer)
+        self.facts[key] = {"answer": answer, "source": "user", "confidence": 1.0, "category": category}
         self._persist()
         return f"Updated: {key} -> {answer}"
 
@@ -184,9 +231,9 @@ class KnowledgeBase:
         existing = self.facts.get(key, "")
         if not existing:
             return None
-        # Consider it a contradiction if the values differ beyond trivial whitespace/case
-        if existing.strip().lower() != new_value.strip().lower():
-            return existing
+        existing_str = self._fact_answer(existing)
+        if existing_str.strip().lower() != new_value.strip().lower():
+            return existing_str
         return None
 
     def find_relevant(self, query, max_facts=4):
@@ -202,7 +249,9 @@ class KnowledgeBase:
             k_words = set(re.findall(r"[a-z]+", k.lower()))
             overlap = len(words & k_words)
             if overlap:
-                scored.append((overlap, k, v))
+                # Boost score by confidence
+                conf = self._fact_confidence(v)
+                scored.append((overlap * conf, k, self._fact_answer(v)))
         scored.sort(reverse=True)
         return [(k, v) for _, k, v in scored[:max_facts]]
 
@@ -262,17 +311,8 @@ class UserMemory:
                                     "going", "trying", "just", "also", "still", "really"):
             found["description"] = m.group(1).strip()
 
-        # "i am X years old"
-        m = re.search(r"i(?:'m| am) (\d+)(?: years old)?", t, re.IGNORECASE)
-        if m:
-            found["age"] = m.group(1)
-
-        # "i live in X" / "i'm from X" / "i'm in X"
-        m = re.search(r"i(?:'m| am) (?:from|in) ([a-z][\w ]{2,25})", t, re.IGNORECASE)
-        if not m:
-            m = re.search(r"i live in ([a-z][\w ]{2,25})", t, re.IGNORECASE)
-        if m:
-            found["location"] = m.group(1).strip().title()
+        # "i am X years old" — not stored (privacy)
+        # "i live in X" / "i'm from X" — not stored (privacy)
 
         # "i'm building X" / "i'm working on X" / "my project is X"
         m = re.search(r"(?:i(?:'m| am) (?:building|working on|creating|making)|my project is) ([a-z][\w ]{2,40})", t, re.IGNORECASE)
@@ -306,10 +346,6 @@ class UserMemory:
         parts = []
         if "name" in self.facts:
             parts.append(f"The user's name is {self.facts['name']}.")
-        if "age" in self.facts:
-            parts.append(f"They are {self.facts['age']} years old.")
-        if "location" in self.facts:
-            parts.append(f"They are from/in {self.facts['location']}.")
         if "description" in self.facts:
             parts.append(f"They described themselves as: {self.facts['description']}.")
         if "project" in self.facts:
@@ -321,6 +357,6 @@ class UserMemory:
         if "hobbies" in self.facts:
             parts.append(f"Their hobbies include: {', '.join(self.facts['hobbies'])}.")
         for key, val in self.facts.items():
-            if key not in ("name", "age", "location", "description", "project", "likes", "dislikes", "hobbies"):
+            if key not in ("name", "description", "project", "likes", "dislikes", "hobbies"):
                 parts.append(f"{key}: {val}.")
         return "What you know about the user — " + " ".join(parts)

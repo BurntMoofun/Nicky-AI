@@ -1,4 +1,209 @@
-# 🤖 Nicky AI
+# 🤖 Nicky AI — V2
+
+> A personal AI assistant built in Python — originally designed to control a robotic arm, now a full-featured AI companion with games, tools, voice, and personality.
+
+---
+
+## ✨ Features
+
+### 🧠 AI Core
+- Powered by **Ollama** (local LLM — llama3 or any model) + optional **Google Gemini**
+- Persistent **long-term memory** — remembers your name, age, location, hobbies, projects
+- **Custom personality** — adjusts tone through conversation (sarcastic, funny, serious, etc.)
+- **Mood system** — Nicky's mood shifts based on conversation (shown as emoji in prompt)
+- **Knowledge base** — auto-saves every DDG/Wikipedia search result for future recall
+- **Chain-of-thought reasoning** — breaks down complex questions step by step
+- **Topic tracking** — maintains context across follow-up questions
+
+### 🛠️ Tools
+| Command | What it does |
+|---|---|
+| `weather in Tokyo` | Live weather via wttr.in |
+| `weather forecast for Tokyo` | 3-day weather forecast |
+| `news` / `tech news` | BBC RSS headlines |
+| `set a 10 minute timer` | Background timer with voice alert |
+| `add buy milk` | Persistent to-do list |
+| `what is 15% of 200` | Math solver with percentage support |
+| `translate hello to Spanish` | Free translation (MyMemory API) |
+| `volume up` / `mute` | Windows volume control |
+| `open calculator` | Open any app by name |
+| `screenshot` | Saves screenshot to Desktop |
+| `convert 100 km to miles` | Unit conversion (length, weight, temp, speed, volume) |
+| `system info` / `battery level` | CPU, RAM, disk, battery stats |
+| `take a note: X` | Persistent notes system |
+| `copy X to clipboard` | Clipboard read/write |
+| `roll a dice` / `flip a coin` | Dice, coins, random numbers, random colors |
+| `what time is it in Tokyo` | World clock / time zones |
+| `what is my IP` / `am I online` | Network status |
+| `generate a password` | Cryptographically secure password generator |
+| `export chat history` | Save conversation to .txt on Desktop |
+
+### 🎮 Games
+| Game | Mode |
+|---|---|
+| Snake | Nicky plays solo |
+| Brick Breaker | Nicky plays solo |
+| Chess | You vs Nicky |
+| Connect 4 | You vs Nicky (minimax AI) |
+| Tic Tac Toe | You vs Nicky (unbeatable) |
+| Hangman | You play, Nicky hosts |
+| Pong | You (W/S keys) vs Nicky |
+| Wordle | Classic word game |
+| Blackjack | Casino-style card game |
+| 2048 | Sliding tile puzzle |
+| Simon Says | Memory pattern game |
+| Minesweeper | Classic grid puzzle |
+| Sudoku | Number placement puzzle |
+
+### 🤝 Conversation Modes
+- **Casual Mode** — pure chat, no arm commands
+- **Workshop Mode** — full robotic arm control + chat
+- **100% Output Mode** — hype music + fast arm movements (15% chance of Rick Roll 💀)
+
+### 📖 Creative AI
+- `tell me a story about X` — collaborative storytelling
+- `quiz me on space` — dynamic quiz on any topic
+- `explain this code: [code]` — code helper and explainer
+- `tell me a programming joke` — categorized jokes (programming, dad jokes, puns)
+- `fun fact about space` — facts by category (space, animals, history, science, tech)
+
+### 🦾 Robotic Arm (Workshop Mode)
+- Move commands: `move left/right/up/down/forward/back`
+- `grab`, `release`, `throw`
+- Camera scan, object detection, sequences
+
+---
+
+## 🚀 Installation & Setup (Step by Step)
+
+### Step 1 — Install Python 3.10+
+1. Go to [python.org/downloads](https://www.python.org/downloads/)
+2. Download the latest **Python 3.10+** installer for Windows
+3. Run the installer — **check "Add Python to PATH"** before clicking Install
+4. Verify it worked:
+   ```bash
+   python --version
+   ```
+
+---
+
+### Step 2 — Clone the Repo
+```bash
+git clone https://github.com/BurntMoofun/Nicky-V2.git
+cd Nicky-V2
+```
+
+---
+
+### Step 3 — Install Python Dependencies
+```bash
+pip install -r requirements.txt
+```
+
+| Package | What it's for |
+|---|---|
+| `pyttsx3` | Text-to-speech (Nicky's voice) |
+| `SpeechRecognition` | Microphone/voice input |
+| `sounddevice` + `soundfile` | Audio playback |
+| `edge-tts` | Higher quality TTS voice option |
+| `wikipedia` | Wikipedia lookups |
+| `matplotlib` | Workspace visualization / graphs |
+| `sentence-transformers` | Smarter understanding of your questions |
+| `torch` | Required by sentence-transformers (PyTorch) |
+| `numpy` | Math/array support |
+| `ddgs` | DuckDuckGo web search |
+| `psutil` | System info (CPU, RAM, battery, disk) |
+
+---
+
+### Step 4 — Install Ollama (the AI brain)
+1. Go to [ollama.com](https://ollama.com) and click **Download for Windows**
+2. Run the installer
+3. Pull the model:
+   ```bash
+   ollama pull llama3.2
+   ```
+
+---
+
+### Step 5 — Run Nicky
+```bash
+python main.py
+```
+
+---
+
+### ❓ Troubleshooting
+
+**`pip` not recognized** → Make sure you checked "Add Python to PATH" during install.
+
+**`torch` install fails** → Try: `pip install torch --index-url https://download.pytorch.org/whl/cpu`
+
+**Ollama not responding** → Run `ollama serve` in a terminal.
+
+**No voice output** → `pyttsx3` requires Windows. Make sure speakers aren't muted.
+
+**Microphone not working** → Voice input is optional. Just type instead.
+
+---
+
+## 🎵 100% Output Mode
+Drop a music file named `hype.mp3` into the project folder, then say:
+```
+100% output
+```
+
+---
+
+## ⚙️ Optional: Google Gemini
+```
+set gemini key YOUR_KEY_HERE
+use gemini
+```
+
+---
+
+## 📋 Requirements
+- Python 3.10+
+- [Ollama](https://ollama.com) running locally
+- Windows (for voice, volume control, screenshot features)
+- Microphone (optional)
+
+---
+
+## 🗂️ Project Structure
+```
+Nicky-V2/
+├── main.py           # Entry point
+├── chatbot.py        # Core AI logic and all commands
+├── llm.py            # Ollama + Gemini clients
+├── knowledge.py      # Knowledge base + user memory
+├── personality.py    # Mood + custom personality system
+├── voice.py          # TTS + speech recognition
+├── arm.py            # Robotic arm + NLU engine
+├── games.py          # All 13 games
+├── gui.py            # Optional GUI (--gui flag)
+├── spotify.py        # YouTube Music integration
+├── calendar_manager.py # Calendar + reminders
+├── wakeword.py       # Wake word detection
+├── requirements.txt
+└── nicky_data/       # Auto-created — stores memory, knowledge, todos, notes
+```
+
+---
+
+## 🎬 Demo
+*[coming soon]*
+
+---
+
+## 📝 License
+MIT — do whatever you want with it.
+
+---
+
+*Built by a teenager with a robotic arm and too much free time. 🤖*
+
 
 > A personal AI assistant built in Python — originally designed to control a robotic arm, now a full-featured AI companion with games, tools, voice, and personality.
 

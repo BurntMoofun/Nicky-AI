@@ -3,7 +3,11 @@ from chatbot import Chatbot
 
 if __name__ == "__main__":
     chatbot = Chatbot()
-    chatbot.chat()
+    if "--gui" in sys.argv:
+        from gui import NickyGUI
+        NickyGUI(chatbot).run()
+    else:
+        chatbot.chat()
     sys.exit(0)
 
     """Local LLM via Ollama — streaming, memory-aware answers for Nicky."""

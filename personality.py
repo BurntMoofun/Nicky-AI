@@ -58,6 +58,13 @@ class CustomPersonality:
         "detailed":   "You give thorough, detailed explanations when answering.",
     }
 
+    # Pairs of traits that contradict each other
+    CONFLICTING_PAIRS = [
+        ("sarcastic", "serious"),
+        ("concise", "detailed"),
+        ("casual", "serious"),
+    ]
+
     def __init__(self, data_dir):
         self.data_dir = data_dir
         self.traits = []
@@ -87,12 +94,20 @@ class CustomPersonality:
             if any(trigger in t for trigger in triggers):
                 if trait not in self.traits:
                     self.traits.append(trait)
+                    # Check for conflicts and warn
+                    conflicts = [other for pair in self.CONFLICTING_PAIRS
+                                 if trait in pair
+                                 for other in pair if other != trait and other in self.traits]
+                    self.save()
+                    if conflicts:
+                        return (f"Got it — I'll be more {trait} from now on. "
+                                f"⚠️ Heads up: '{trait}' may conflict with '{conflicts[0]}' — "
+                                f"say 'stop being {conflicts[0]}' to clear it.")
+                    return f"Got it — I'll be more {trait} from now on."
                 else:
                     self.traits.remove(trait)
                     self.save()
                     return f"Okay, toning down the {trait} side."
-                self.save()
-                return f"Got it — I'll be more {trait} from now on."
         if any(p in t for p in ("reset personality", "default personality", "stop being", "normal please")):
             self.traits = []
             self.save()

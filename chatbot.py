@@ -48,6 +48,8 @@ class Chatbot:
         self._todos = self._load_todos()
         self._current_topic = None
         self._full_output = False
+        self._roast_mode = False
+        self._compliment_mode = False
         self._music_proc = None
         self._audio_stream = None
         self._audio_volume = 1.0
@@ -56,10 +58,55 @@ class Chatbot:
         self.user_memory = UserMemory(self.data_dir)
         self.custom_personality = CustomPersonality(self.data_dir)
         self._load_data()
+        self._config = self._load_config()
+        # Integrations (lazy init)
+        self._spotify = None
+        self._calendar = None
+        self._init_integrations()
+        self._weather_cache: dict = {}  # {city: (timestamp, result)}
+        self._last_joke_query = ""
+        self._last_fact_query = ""
 
     def _create_data_directory(self):
         if not os.path.exists(self.data_dir):
             os.makedirs(self.data_dir)
+
+    def _load_config(self) -> dict:
+        """Load API keys and settings from nicky_data/nicky_config.json."""
+        config_path = os.path.join(self.data_dir, "nicky_config.json")
+        defaults = {
+            "openweathermap_key": "",
+            "spotify_client_id": "",
+            "spotify_client_secret": "",
+            "spotify_redirect_uri": "http://localhost:8888/callback",
+        }
+        if os.path.exists(config_path):
+            try:
+                with open(config_path, "r") as f:
+                    stored = json.load(f)
+                defaults.update(stored)
+            except Exception:
+                pass
+        else:
+            # Create default config file on first run
+            try:
+                with open(config_path, "w") as f:
+                    json.dump(defaults, f, indent=2)
+                print(f"[Nicky AI] Created config file: {config_path}")
+                print("           Add your API keys there to enable weather + Spotify.")
+            except Exception:
+                pass
+        return defaults
+
+    def _init_integrations(self):
+        """Initialize YouTube Music and Calendar integrations."""
+        from calendar_manager import CalendarManager
+        self._calendar = CalendarManager(self.data_dir)
+        try:
+            from spotify import YTMusicController
+            self._spotify = YTMusicController()
+        except Exception:
+            self._spotify = None
 
     def _load_data(self):
         hist_file = os.path.join(self.data_dir, "conversation_history.json")
@@ -225,15 +272,28 @@ class Chatbot:
     )
 
     def _get_ollama_system_prompt(self, text=""):
-        mood_descriptions = {"neutral": "helpful and professional", "happy": "enthusiastic and warm", "curious": "inquisitive and engaged", "focused": "precise and efficient"}
-        mood = mood_descriptions.get(self.personality.mood, "helpful")
-        base = self.NICKY_PERSONA + f"Your current mood is {mood}. "
+        mood_instructions = {
+            "neutral":  "You are calm and balanced — be helpful and professional.",
+            "happy":    "You are in a great mood — be enthusiastic and celebratory! Use exclamation marks.",
+            "curious":  "You are feeling curious — after answering, ask a thoughtful follow-up question.",
+            "focused":  "You are in focused mode — be precise and data-driven. Cut all fluff.",
+        }
+        mood = mood_instructions.get(self.personality.mood, mood_instructions["neutral"])
+        base = self.NICKY_PERSONA + f"Mood instruction: {mood} "
         trait_text = self.custom_personality.as_prompt_text()
         if trait_text:
             base += trait_text + " "
         user_text = self.user_memory.as_prompt_text()
         if user_text:
             base += user_text + " "
+        if self._roast_mode:
+            base += ("\n🔥 ROAST MODE ACTIVE: Gently but hilariously roast the user and their questions. "
+                     "Be playfully savage, use sarcasm and hyperbole. Think Comedy Central Roast style. "
+                     "Keep it fun — never genuinely cruel.")
+        elif self._compliment_mode:
+            base += ("\n💛 COMPLIMENT MODE ACTIVE: Shower the user with sincere, specific compliments. "
+                     "Everything they say is brilliant. Find the silver lining in everything. "
+                     "Hype them up like they're the greatest human alive.")
         if text:
             relevant = self.knowledge.find_relevant(text, max_facts=4)
             if relevant:
@@ -253,8 +313,18 @@ class Chatbot:
     def _update_ollama_history(self, user_msg, assistant_response):
         self.ollama_history.append({"role": "user", "content": user_msg})
         self.ollama_history.append({"role": "assistant", "content": assistant_response})
-        if len(self.ollama_history) > 20:
-            self.ollama_history = self.ollama_history[-20:]
+        # When history exceeds 40 messages, summarize the oldest 20 into a single entry
+        if len(self.ollama_history) > 40:
+            oldest = self.ollama_history[:20]
+            summary_lines = []
+            for i in range(0, len(oldest) - 1, 2):
+                u = oldest[i]["content"][:70]
+                a = oldest[i + 1]["content"][:90] if i + 1 < len(oldest) else ""
+                summary_lines.append(f"- {u}... → {a}...")
+            summary = "Summary of earlier conversation:\n" + "\n".join(summary_lines[:6])
+            self.ollama_history = [{"role": "assistant", "content": summary}] + self.ollama_history[20:]
+        if len(self.ollama_history) > 40:
+            self.ollama_history = self.ollama_history[-40:]
         self._current_topic = self._extract_topic(user_msg)
 
     def _extract_topic(self, text):
@@ -313,7 +383,7 @@ class Chatbot:
         if self._full_output:
             intent, _ = self.nlu.predict(text_lower)
             if intent in self._ARM_INTENTS:
-                return self._dispatch(intent, text, text_lower, prefix)
+                return self._dispatch(intent, text_lower, prefix)
             return self.respond(f"{prefix}⚡ 100% Output mode — arm commands only. Say 'stop output' to exit.")
 
         if any(text_lower == t or t in text_lower for t in _CASUAL_MODE_TRIGGERS):
@@ -346,11 +416,68 @@ class Chatbot:
             self.llm_backend = "auto"
             return self.respond(f"{prefix}Back to 🤖🦙 Auto mode.")
 
+        # ── Roast / Compliment modes ───────────────────────────────────────
+        _ROAST_TRIGGERS = ("roast mode", "roast me", "be mean to me", "be savage", "savage mode", "turn on roast", "enable roast")
+        _ROAST_OFF = ("stop roasting", "stop being mean", "roast mode off", "turn off roast")
+        _COMP_TRIGGERS = ("compliment mode", "complement mode", "be nice to me", "hype me up", "nice mode", "turn on compliment", "enable compliment", "sweet mode")
+        _COMP_OFF = ("stop complimenting", "compliment mode off", "turn off compliment")
+        if any(t in text_lower for t in _ROAST_OFF):
+            self._roast_mode = False
+            return self.respond(f"{prefix}🔥 Roast Mode OFF. I'll go easy on you. 😌")
+        if any(t in text_lower for t in _COMP_OFF):
+            self._compliment_mode = False
+            return self.respond(f"{prefix}💛 Compliment Mode OFF. Back to normal. 😊")
+        if any(t in text_lower for t in _ROAST_TRIGGERS):
+            return self._cmd_roast_mode(text_lower, prefix)
+        if any(t in text_lower for t in _COMP_TRIGGERS):
+            return self._cmd_compliment_mode(text_lower, prefix)
+
+        # ── UX Commands ───────────────────────────────────────────────────
+        if any(t in text_lower for t in ("show profile", "my profile", "what do you know about me", "show my profile")):
+            return self._cmd_show_profile(prefix)
+        if any(t in text_lower for t in ("show knowledge", "browse knowledge", "knowledge base",
+                                          "show facts", "list facts", "show kb",
+                                          "knowledge stats", "what do you know", "knowledge overview")):
+            return self._cmd_kb_browser(text_lower, prefix)
+        if text_lower.startswith("knowledge ") and not text_lower.startswith("knowledge base"):
+            return self._cmd_kb_browser(text_lower, prefix)
+        if text_lower.startswith("search history") or text_lower.startswith("search chat"):
+            return self._cmd_history_search(text_lower, prefix)
+
+        # ── Wake word toggle ───────────────────────────────────────────────
+        if "wake word on" in text_lower or "enable wake word" in text_lower:
+            return self._cmd_wake_word(True, prefix)
+        if "wake word off" in text_lower or "disable wake word" in text_lower:
+            return self._cmd_wake_word(False, prefix)
+
+        # ── Spotify ────────────────────────────────────────────────────────
+        _SPOT_TRIGGERS = ("play ", "pause music", "next song", "skip song",
+                          "previous song", "what is playing", "what's playing",
+                          "youtube music", "yt music", "music volume", "now playing")
+        if any(t in text_lower for t in _SPOT_TRIGGERS):
+            return self._cmd_spotify(text_lower, prefix)
+
+        # ── Calendar ──────────────────────────────────────────────────────
+        _CAL_TRIGGERS = ("add event", "schedule ", "calendar today", "calendar this week",
+                         "what is on my calendar", "what's on my calendar", "my schedule",
+                         "delete event", "remove event", "set reminder", "upcoming events",
+                         "events today", "events this week", "events next week")
+        if any(t in text_lower for t in _CAL_TRIGGERS):
+            return self._cmd_calendar(text_lower, prefix)
+
         _TIMER_TRIGGERS = ("set a timer", "set timer", "timer for", "start stopwatch", "stop stopwatch", "check stopwatch", "how long", "time remaining", "cancel timer", "stop timer", "timer status", "stopwatch")
         if any(t in text_lower for t in _TIMER_TRIGGERS):
             return self._cmd_timer(text_lower, prefix)
 
-        _TODO_TRIGGERS = ("add to my list", "add to the list", "add item", "my list", "read my list", "show my list", "what's on my list", "read list", "done with ", "mark ", "remove from", "delete from", "clear list", "clear my list", "remind me to ", "remember to ", "put ", "to do list", "todo list", "my todo")
+        _TODO_TRIGGERS = (
+            "add to my list", "add to the list", "add item",
+            "my list", "read my list", "show my list", "what's on my list", "read list",
+            "mark as done", "mark done", "mark item",
+            "remove from my list", "remove from the list", "delete from my list", "delete from the list",
+            "clear list", "clear my list",
+            "remind me to ", "remember to ",
+            "to do list", "todo list", "my todo",
+        )
         if any(t in text_lower for t in _TODO_TRIGGERS):
             return self._cmd_todo(text_lower, prefix)
 
@@ -394,11 +521,88 @@ class Chatbot:
         if any(t in text_lower for t in ("screenshot", "take a screenshot", "capture screen")):
             return self._cmd_screenshot(prefix)
 
+        # ── Unit conversion ───────────────────────────────────────────────
+        _CONVERT_TRIGGERS = ("convert ", "how many ", " to miles", " to km", " to feet", " to meters",
+                              " to kg", " to lbs", " to celsius", " to fahrenheit", " to liters",
+                              " to gallons", " to inches", " to cm", "in miles", "in km", "in celsius",
+                              "in fahrenheit")
+        if any(t in text_lower for t in _CONVERT_TRIGGERS) and any(c.isdigit() for c in text_lower):
+            return self._cmd_unit_convert(text_lower, prefix)
+
+        # ── System info ───────────────────────────────────────────────────
+        _SYS_TRIGGERS = ("system info", "system status", "cpu usage", "ram usage", "memory usage",
+                          "disk space", "battery level", "what is my battery", "how much ram",
+                          "how much disk", "how much storage", "pc stats", "computer stats")
+        if any(t in text_lower for t in _SYS_TRIGGERS):
+            return self._cmd_system_info(text_lower, prefix)
+
+        # ── Notes ─────────────────────────────────────────────────────────
+        _NOTES_TRIGGERS = ("take a note", "jot down", "write a note", "note:", "note that",
+                            "read my notes", "show my notes", "list my notes", "my notes",
+                            "delete note ", "clear my notes", "clear notes")
+        if any(t in text_lower for t in _NOTES_TRIGGERS):
+            return self._cmd_notes(text_lower, prefix)
+
+        # ── Clipboard ─────────────────────────────────────────────────────
+        _CLIP_TRIGGERS = ("copy to clipboard", "copy this to clipboard", "read my clipboard",
+                           "what is in my clipboard", "what's in my clipboard", "clipboard")
+        if any(t in text_lower for t in _CLIP_TRIGGERS):
+            return self._cmd_clipboard(text_lower, prefix)
+
+        # ── Dice / Coin / Random ──────────────────────────────────────────
+        _RANDOM_TRIGGERS = ("roll a dice", "roll dice", "roll a die", "roll 1d", "roll 2d", "roll d",
+                             "flip a coin", "flip coin", "heads or tails",
+                             "random number", "pick a number", "random between",
+                             "pick a random", "random color", "random colour")
+        if any(t in text_lower for t in _RANDOM_TRIGGERS):
+            return self._cmd_random(text_lower, prefix)
+
+        # ── Time zones ────────────────────────────────────────────────────
+        _TZ_TRIGGERS = ("what time is it in ", "current time in ", "time in ", "what's the time in ")
+        if any(t in text_lower for t in _TZ_TRIGGERS):
+            return self._cmd_timezone(text_lower, prefix)
+
+        # ── Network info ──────────────────────────────────────────────────
+        _NET_TRIGGERS = ("what is my ip", "what's my ip", "my ip address", "am i online",
+                          "am i connected", "internet connection", "check internet", "network status")
+        if any(t in text_lower for t in _NET_TRIGGERS):
+            return self._cmd_network(text_lower, prefix)
+
+        # ── Export history ────────────────────────────────────────────────
+        if any(t in text_lower for t in ("export chat", "export history", "save chat history", "export conversation")):
+            return self._cmd_export_history(prefix)
+
+        # ── Password generator ────────────────────────────────────────────
+        _PASS_TRIGGERS = ("generate a password", "generate password", "create a password",
+                           "make a password", "random password")
+        if any(t in text_lower for t in _PASS_TRIGGERS):
+            return self._cmd_password_gen(text_lower, prefix)
+
+        # ── Weather forecast ──────────────────────────────────────────────
+        if "weather forecast" in text_lower or "forecast for" in text_lower:
+            return self._cmd_weather_forecast(text_lower, prefix)
+
+        # ── Jokes with category support ───────────────────────────────────
+        _JOKE_TRIGGERS = ("tell me a joke", "tell a joke", "make me laugh", "say a joke",
+                           "tell me a programming joke", "tell me a dad joke", "tell me a pun",
+                           "another joke", "joke please")
+        if any(t in text_lower for t in _JOKE_TRIGGERS):
+            self._last_joke_query = text_lower
+            return self._cmd_joke(prefix)
+
+        # ── Fun facts with category support ───────────────────────────────
+        _FACT_TRIGGERS = ("fun fact", "tell me a fact", "random fact",
+                           "fact about space", "fact about animals", "fact about history",
+                           "fact about science", "fact about tech")
+        if any(t in text_lower for t in _FACT_TRIGGERS):
+            self._last_fact_query = text_lower
+            return self._cmd_fun_fact(prefix)
+
         if self._is_ethics_violation(text_lower):
             return self.respond(random.choice(self._ETHICS_RESPONSES))
 
         web_triggers = ("search for ", "google ", "look up online ", "search online ", "search the web for ")
-        if any(text_lower.startswith(t) or f" {t}" in text_lower for t in web_triggers):
+        if any(text_lower.startswith(t) for t in web_triggers):
             return self._cmd_web_search(text_lower, prefix)
 
         if text_lower.startswith("add ") and " at " in text_lower and "cm" in text_lower:
@@ -407,6 +611,12 @@ class Chatbot:
         if " is " in text_lower and any(p in text_lower for p in ["learn that", "actually", "that's wrong", "remember that"]):
             return self._cmd_learn_fact(text_lower, prefix)
 
+        # ── User-profile questions ("what is my name", "how old am I") ───
+        _USER_Q = ("what is my ", "what's my ", "who am i", "what am i", "do you know my ",
+                   "do you remember my ", "what do you know about me", "what do you know about my ")
+        if any(text_lower.startswith(q) or text_lower == q.strip() for q in _USER_Q):
+            return self._cmd_user_profile_question(text_lower, prefix)
+
         if self._is_personal_question(text_lower):
             return self._cmd_answer_question(text_lower, prefix)
 
@@ -414,16 +624,32 @@ class Chatbot:
         if any(text_lower.startswith(q) for q in QUESTION_STARTERS):
             return self._cmd_answer_question(text_lower, prefix)
 
-        _GAME_TRIGGERS = ("play snake", "play brick", "play chess", "play game", "play a game", "play connect", "play tic", "play tictactoe", "play hangman", "play pong", "start snake", "start chess", "start brick", "start a game", "start connect", "start tic", "start hangman", "start pong", "game time", "play something")
+        _GAME_TRIGGERS = ("play snake", "play brick", "play chess", "play game", "play a game", "play connect", "play tic", "play tictactoe", "play hangman", "play pong", "play wordle", "play blackjack", "play 2048", "play simon", "play minesweeper", "play sudoku", "start snake", "start chess", "start brick", "start a game", "start connect", "start tic", "start hangman", "start pong", "start wordle", "start blackjack", "start 2048", "start simon", "start minesweeper", "start sudoku", "game time", "play something")
         if any(text_lower == t or text_lower.startswith(t) for t in _GAME_TRIGGERS):
             return self._cmd_play_game(text_lower, prefix)
 
-        _CASUAL_STARTERS = ("yeah", "yep", "yup", "nope", "nah", "no i ", "oh", "ah", "haha", "lol", "lmao", "ikr", "bruh", "i meant", "i mean", "wait ", "not what i ", "that's not", "nice", "cool", "awesome", "ok", "okay", "sure", "right", "exactly", "correct", "wrong")
-        _COMMAND_STARTERS = ("play ", "move ", "grab ", "throw ", "release ", "camera", "scan", "search", "google", "save", "load", "reset", "voice ", "visualize", "find ", "add ", "learn ", "status", "launch ", "start ", "translate ", "volume ", "open ", "screenshot", "mute", "unmute", "quiz ", "story ", "timer ", "set a ", "weather ", "news", "calculate ", "todo", "remind", "100%", "full output", "aura mode", "hype mode")
-        _FORCE_CMD_WORDS = frozenset(("move", "grab", "release", "add", "list", "scan", "find", "save", "load", "visualize", "plot"))
+        _CASUAL_STARTERS = (
+            "yeah", "yep", "yup", "nope", "nah",
+            "no ", "no,", "not ", "not,",
+            "oh", "ah", "haha", "lol", "lmao", "ikr", "bruh",
+            "i meant", "i mean", "i think", "i believe", "i feel",
+            "i know", "i don't", "i do ", "i was", "i am ", "i'm ",
+            "wait ", "well ", "well,",
+            "that's not", "that's", "that was", "that is",
+            "it's ", "its ", "it was",
+            "we ", "we've ", "we are", "we were",
+            "they ", "you know", "you see",
+            "nice", "cool", "awesome", "ok", "okay", "sure", "right",
+            "exactly", "correct", "wrong",
+            "maybe ", "perhaps ", "actually ",
+            "honestly ", "basically ", "literally ",
+            "so ", "but ", "and ",
+        )
+        _COMMAND_STARTERS = ("play ", "move ", "grab ", "throw ", "release ", "camera", "scan", "search for", "google ", "save", "load", "reset", "voice ", "visualize", "find ", "add ", "learn ", "status", "launch ", "start ", "translate ", "volume ", "open ", "screenshot", "mute", "unmute", "quiz ", "story ", "timer ", "set a ", "weather ", "news", "calculate ", "todo", "remind me to ", "100%", "full output", "aura mode", "hype mode")
+        _FORCE_CMD_WORDS = frozenset(("move", "grab", "release", "scan", "save", "load", "visualize", "plot"))
         is_casual = (
             any(text_lower.startswith(s) for s in _CASUAL_STARTERS)
-            or (len(text_lower.split()) <= 3
+            or (len(text_lower.split()) <= 5
                 and not any(text_lower.startswith(c) for c in _COMMAND_STARTERS)
                 and not any(w in _FORCE_CMD_WORDS for w in text_lower.split()))
         )
@@ -507,8 +733,12 @@ class Chatbot:
         elif intent == "farewell":      return self.respond(random.choice(["Farewell! Until next time.", "Goodbye!", "See you soon.", "Bye! Stay safe."]))
         elif intent == "how_are_you":   return self.respond(random.choice(["All systems operational.", "Running perfectly.", "Feeling great — motors warmed up.", "Excellent. All sensors nominal."]))
         elif intent == "thanks":        return self.respond(random.choice(["You're welcome!", "Anytime.", "Happy to help!", "Of course."]))
-        elif intent == "joke":          return self._cmd_joke(prefix)
-        elif intent == "fun_fact":      return self._cmd_fun_fact(prefix)
+        elif intent == "joke":
+            self._last_joke_query = text
+            return self._cmd_joke(prefix)
+        elif intent == "fun_fact":
+            self._last_fact_query = text
+            return self._cmd_fun_fact(prefix)
         elif intent == "learn_fact":    return self.respond(f"{prefix}Format: 'learn that [X] is [Y]'")
         elif intent == "web_search":    return self._cmd_web_search(text, prefix)
         elif intent == "ask_question":  return self._cmd_answer_question(text, prefix)
@@ -692,14 +922,22 @@ class Chatbot:
         return self.respond(random.choice([f"Arm at {pos} position. Gripper {grip}.{hold_str}", f"Position: {pos} | Grip: {grip}{hold_str}"]))
 
     def _cmd_play_game(self, text, prefix=""):
+        from games import (WordleGame, BlackjackGame, Game2048,
+                           SimonSaysGame, MinesweeperGame, SudokuGame)
         text_l = text.lower()
-        if "chess" in text_l:           game_name, game_cls = "Chess", ChessGame
-        elif "brick" in text_l:         game_name, game_cls = "Brick Breaker", BrickBreakerGame
-        elif "connect" in text_l:       game_name, game_cls = "Connect 4", Connect4Game
+        if "chess" in text_l:                           game_name, game_cls = "Chess", ChessGame
+        elif "brick" in text_l:                         game_name, game_cls = "Brick Breaker", BrickBreakerGame
+        elif "connect" in text_l:                       game_name, game_cls = "Connect 4", Connect4Game
         elif "tictactoe" in text_l or "tic tac" in text_l: game_name, game_cls = "Tic Tac Toe", TicTacToeGame
-        elif "hangman" in text_l:       game_name, game_cls = "Hangman", HangmanGame
-        elif "pong" in text_l:          game_name, game_cls = "Pong", PongGame
-        else:                           game_name, game_cls = "Snake", SnakeGame
+        elif "hangman" in text_l:                       game_name, game_cls = "Hangman", HangmanGame
+        elif "pong" in text_l:                          game_name, game_cls = "Pong", PongGame
+        elif "wordle" in text_l:                        game_name, game_cls = "Wordle", WordleGame
+        elif "blackjack" in text_l or "black jack" in text_l: game_name, game_cls = "Blackjack", BlackjackGame
+        elif "2048" in text_l:                          game_name, game_cls = "2048", Game2048
+        elif "simon" in text_l:                         game_name, game_cls = "Simon Says", SimonSaysGame
+        elif "minesweeper" in text_l or "mine sweeper" in text_l: game_name, game_cls = "Minesweeper", MinesweeperGame
+        elif "sudoku" in text_l:                        game_name, game_cls = "Sudoku", SudokuGame
+        else:                                           game_name, game_cls = "Snake", SnakeGame
 
         def _say(msg):
             print(f"[Nicky] {msg}")
@@ -981,43 +1219,156 @@ class Chatbot:
         return self.respond(f"{prefix}💻 I need Ollama or Gemini for code help.")
 
     def _cmd_help(self, prefix=""):
+        roast_status  = " 🔥ON" if self._roast_mode else ""
+        comp_status   = " 💛ON" if self._compliment_mode else ""
+        wake_detector = getattr(self.voice, "_wake_detector", None)
+        wake_status   = " 👂ON" if (wake_detector and wake_detector.is_active) else ""
+        mode_label    = "💬 Casual" if self.mode == "casual" else ("🔧 Workshop" if self.mode != "100%" else "💯 100%")
         return self.respond(
-            f"{prefix}Here's everything you can tell me:\n"
-            "  🦾 Arm:       'move left/right/up/down/forward/back/neutral'\n"
-            "  ✊ Grab:      'grab [object]'  |  'release'\n"
-            "  🎯 Throw:     'throw [object]'\n"
-            "  📦 Objects:   'add ball at 50cm 0degrees'  |  'list objects'  |  'find [object]'\n"
-            "  📷 Vision:    'camera on/off'  |  'scan'\n"
-            "  🌐 Search:    'search for [topic]'  |  'google [topic]'\n"
-            "  🧠 Learn:     'learn that [X] is [Y]'\n"
-            "  ❓ Ask:       'what is [topic]'  |  'who is [person]'\n"
-            "  🎙️ Voice:     'voice on'  |  'voice off'\n"
-            "  💾 Data:      'save'  |  'load'  |  'visualize'\n"
-            "  😄 Fun:       'tell me a joke'  |  'fun fact'\n"
-            "  ⏱️ Timer:     'set a timer for 5 minutes'  |  'start stopwatch'\n"
-            "  📝 To-do:     'add to my list: [task]'  |  'read my list'\n"
-            "  🧮 Math:      'calculate 15% of 200'  |  'what is 45 * 12'\n"
-            "  🌤️ Weather:   'weather in London'\n"
-            "  📰 News:      'what's in the news'\n"
-            "  🎮 Games:     'play snake/chess/pong/hangman/connect 4/tic tac toe/brick breaker'\n"
-            "  🌍 Translate: 'translate hello to Spanish'\n"
-            "  📖 Story:     'tell me a story about pirates'\n"
-            "  🧠 Quiz:      'quiz me on space'\n"
-            "  💻 Code:      'write a function that does X'\n"
-            "  🔊 Volume:    'volume up/down'  |  'mute'  |  'set volume to 70'\n"
-            "  📂 Open:      'open calculator'  |  'open notepad'\n"
-            "  📸 Screen:    'screenshot'\n"
-            "  🔀 Modes:     'casual mode'  |  'workshop mode'  |  '100% output'\n"
-            f"  ℹ️ System:    'status'  |  'reset'  |  'quit'  — mode: {'💬 Casual' if self.mode == 'casual' else '🔧 Workshop'}  brain: {self.llm_backend}"
+            f"{prefix}━━━━━━━━━━━━━━━  Nicky AI — All Commands  ━━━━━━━━━━━━━━━\n"
+            "\n🦾 ARM CONTROL\n"
+            "  move left/right/up/down/forward/back/neutral\n"
+            "  grab [object]  |  release  |  throw [object]\n"
+            "  add ball at 50cm 0degrees  |  list objects  |  find [object]\n"
+            "  camera on/off  |  scan  |  visualize  |  status\n"
+            "\n🎙️ VOICE & WAKE WORD\n"
+            "  voice on/off\n"
+            f"  wake word on/off{wake_status}  — say 'Hey Nicky' to trigger\n"
+            "\n🎵 YOUTUBE MUSIC\n"
+            "  play [song name]\n"
+            "  pause music  |  next song  |  previous song\n"
+            "  what's playing  |  open youtube music  |  music volume [0-100]\n"
+            "\n📅 CALENDAR\n"
+            "  add event [title] on [date] at [time]\n"
+            "  what is on my calendar today  |  events this week\n"
+            "  delete event [id]\n"
+            "\n🌤️ WEATHER & NEWS\n"
+            "  weather in [city]\n"
+            "  what's in the news  |  news about [topic]\n"
+            "\n🧠 KNOWLEDGE & MEMORY\n"
+            "  learn that [X] is [Y]\n"
+            "  what is [topic]  |  who is [person]\n"
+            "  search for [topic]  |  google [topic]\n"
+            "  show knowledge          — all stored facts\n"
+            "  knowledge stats         — facts count by category & source\n"
+            "  knowledge [word]        — filter facts by keyword/category\n"
+            "    e.g. 'knowledge robotics' / 'knowledge ai' / 'knowledge programming'\n"
+            "  what do you know        — same as show knowledge\n"
+            "  show profile            — what Nicky knows about you\n"
+            "  search history [term]   — search past conversations\n"
+            "  what is my name  |  what is my occupation\n"
+            "\n😄 PERSONALITY\n"
+            f"  roast mode{roast_status}  |  stop roasting\n"
+            f"  compliment mode{comp_status}  |  stop complimenting\n"
+            "  be [trait]  — e.g. 'be sarcastic', 'be detailed'\n"
+            "\n🎮 GAMES\n"
+            "  play snake / brick breaker / chess / connect 4\n"
+            "  play tic tac toe / hangman / pong\n"
+            "  play wordle / blackjack / 2048 / simon says\n"
+            "  play minesweeper / sudoku\n"
+            "\n📝 PRODUCTIVITY\n"
+            "  add to my list: [task]  |  read my list  |  mark as done [task]\n"
+            "  set a timer for [5 minutes]  |  start stopwatch  |  stop stopwatch\n"
+            "  calculate [expression]  |  15% of 200\n"
+            "\n💻 TOOLS\n"
+            "  translate [text] to [language]\n"
+            "  tell me a story about [topic]\n"
+            "  quiz me on [topic]\n"
+            "  write a function that [does X]  |  debug this code\n"
+            "  volume up/down  |  mute  |  set volume to 70\n"
+            "  open [app]  |  screenshot\n"
+            "\n⚙️ SYSTEM\n"
+            "  casual mode  |  workshop mode  |  100% output\n"
+            "  use gemini  |  use ollama  |  use auto\n"
+            "  save  |  load  |  reset  |  quit\n"
+            "\n🆕 V2 NEW COMMANDS\n"
+            "  convert 100 km to miles  |  30 celsius to fahrenheit  |  10 kg to lbs\n"
+            "  system info  |  cpu usage  |  battery level  |  disk space\n"
+            "  take a note: [text]  |  read my notes  |  delete note 1\n"
+            "  copy [text] to clipboard  |  read my clipboard\n"
+            "  roll a dice  |  roll 2d20  |  flip a coin  |  random number 1-100\n"
+            "  random color  |  generate a password  |  generate a 20 character password\n"
+            "  what time is it in Tokyo  |  current time in London\n"
+            "  what is my IP  |  am I online\n"
+            "  weather forecast for London\n"
+            "  export chat history\n"
+            "  tell me a programming joke  |  tell me a dad joke\n"
+            "  fun fact about space  |  fun fact about animals\n"
+            f"  ─── mode: {mode_label}   brain: {self.llm_backend} ───"
         )
 
     def _cmd_joke(self, prefix=""):
-        jokes = ["Why did the robot go to school? To improve its CPU!", "I tried to grab myself once. Got all wrapped up in it.", "How do robots eat? They bolt their food!", "Why was the robot tired? It had a hard drive.", "I would tell you a joke about my arm... but I need a good angle."]
-        return self.respond(f"{prefix}{random.choice(jokes)}")
+        import re, urllib.request, json as _json
+        text_lower = getattr(self, "_last_joke_query", "")
+        categories = {"programming": "Programming", "dark": "Dark", "pun": "Pun", "misc": "Misc", "dad": "Pun"}
+        cat = None
+        for k, v in categories.items():
+            if k in text_lower:
+                cat = v; break
+        try:
+            cat_path = cat if cat else "Any"
+            url = f"https://v2.jokeapi.dev/joke/{cat_path}?blacklistFlags=nsfw,racist,sexist&type=single"
+            req = urllib.request.Request(url, headers={"Accept": "application/json"})
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                data = _json.loads(resp.read().decode())
+            if data.get("type") == "single" and data.get("joke"):
+                return self.respond(f"{prefix}😄 {data['joke']}")
+            if data.get("type") == "twopart":
+                return self.respond(f"{prefix}😄 {data['setup']}\n  ... {data['delivery']}")
+        except Exception:
+            pass
+        fallback = ["Why did the robot go to school? To improve its CPU!",
+                    "I tried to grab myself once. Got all wrapped up in it.",
+                    "How do robots eat? They bolt their food!",
+                    "Why was the robot tired? It had a hard drive.",
+                    "I would tell you a joke about my arm... but I need a good angle.",
+                    "Why do programmers prefer dark mode? Because light attracts bugs.",
+                    "A SQL query walks into a bar, walks up to two tables and asks... 'Can I join you?'",
+                    "Why do Java developers wear glasses? Because they don't C#."]
+        import random as _r
+        return self.respond(f"{prefix}😄 {_r.choice(fallback)}")
 
     def _cmd_fun_fact(self, prefix=""):
-        facts = ["The word 'robot' comes from Czech 'robota', meaning forced labor.", "The first industrial robot was installed at a GM factory in 1961.", "Robotic arms can repeat the same motion thousands of times with sub-millimeter precision.", "NASA's Canadarm2 on the ISS can handle objects weighing up to 116,000 kg.", "The human arm has 7 degrees of freedom. Most industrial robots have 6."]
-        return self.respond(f"{prefix}{random.choice(facts)}")
+        import re, urllib.request, json as _json, random as _r
+        text_lower = getattr(self, "_last_fact_query", "")
+        _FACTS = {
+            "space":   ["The Sun contains 99.86% of the mass in our Solar System.",
+                        "A day on Venus is longer than a year on Venus.",
+                        "Neutron stars can spin 600 times per second.",
+                        "There are more stars in the universe than grains of sand on all Earth's beaches.",
+                        "The footprints on the Moon will last millions of years — no wind to erase them."],
+            "animals": ["Octopuses have three hearts and blue blood.",
+                        "A group of flamingos is called a 'flamboyance'.",
+                        "Crows can recognise human faces and hold grudges.",
+                        "A shrimp's heart is in its head.",
+                        "Sloths can hold their breath longer than dolphins — up to 40 minutes."],
+            "history": ["Cleopatra lived closer in time to the Moon landing than to the construction of the Great Pyramid.",
+                        "Oxford University is older than the Aztec Empire.",
+                        "Nintendo was founded in 1889 — as a playing card company.",
+                        "The shortest war in history lasted 38–45 minutes (Anglo-Zanzibar War, 1896).",
+                        "Vikings never actually wore horned helmets."],
+            "science": ["Honey never spoils — archaeologists have eaten 3000-year-old honey.",
+                        "Hot water can freeze faster than cold water (the Mpemba effect).",
+                        "The human body contains enough carbon to make about 900 pencils.",
+                        "A teaspoonful of neutron star material would weigh about 900 times the mass of the Great Pyramid.",
+                        "Lightning strikes the Earth about 100 times per second."],
+            "tech":    ["The first computer bug was an actual moth found in a relay of the Harvard Mark II in 1947.",
+                        "The average person spends about 6 years of their life on social media.",
+                        "More than 90% of the world's currency exists only on computers.",
+                        "The first website is still online at info.cern.ch.",
+                        "It would take about 1,000 years to watch all the video uploaded to YouTube so far."],
+            "robots":  ["The word 'robot' comes from Czech 'robota', meaning forced labor.",
+                        "The first industrial robot was installed at a GM factory in 1961.",
+                        "Robotic arms can repeat the same motion thousands of times with sub-millimeter precision.",
+                        "NASA's Canadarm2 on the ISS can handle objects weighing up to 116,000 kg.",
+                        "The human arm has 7 degrees of freedom. Most industrial robots have 6."],
+        }
+        for cat, facts in _FACTS.items():
+            if cat in text_lower:
+                return self.respond(f"{prefix}🌟 Fun fact ({cat}): {_r.choice(facts)}")
+        # No category — pick random from all
+        all_facts = [f for facts in _FACTS.values() for f in facts]
+        return self.respond(f"{prefix}🌟 {_r.choice(all_facts)}")
 
     def _cmd_timer(self, text, prefix=""):
         import threading, re
@@ -1134,20 +1485,63 @@ class Chatbot:
         return self.respond(f"{prefix}" + "\n".join(lines))
 
     def _cmd_weather(self, text, prefix=""):
-        import urllib.request, urllib.parse, json as _json, re
+        import urllib.request, urllib.parse, json as _json, re, time as _time
         city = None
-        for pat in (r'weather (?:in|for|at) (.+)', r'temperature (?:in|for|at) (.+)', r'how (?:hot|cold|warm) is it (?:in|at) (.+)'):
+        for pat in (r'weather (?:in|for|at) (.+)', r'temperature (?:in|for|at) (.+)',
+                    r'how (?:hot|cold|warm) is it (?:in|at) (.+)'):
             m = re.search(pat, text.lower().strip())
-            if m: city = m.group(1).strip().rstrip("?."); break
+            if m:
+                city = m.group(1).strip().rstrip("?.")
+                break
         if not city:
             return self.respond(f"{prefix}🌤️ Which city? Try: 'weather in London'")
+
+        # 10-minute cache
+        cached = self._weather_cache.get(city.lower())
+        if cached and (_time.time() - cached[0]) < 600:
+            return self.respond(f"{prefix}{cached[1]}")
+
+        # Try OpenWeatherMap first if API key is set
+        owm_key = self._config.get("openweathermap_key", "")
+        if owm_key:
+            try:
+                url = (f"https://api.openweathermap.org/data/2.5/weather"
+                       f"?q={urllib.parse.quote(city)}&appid={owm_key}&units=metric")
+                req = urllib.request.Request(url, headers={"User-Agent": "NickyAI/1.0"})
+                with urllib.request.urlopen(req, timeout=8) as resp:
+                    data = _json.loads(resp.read().decode())
+                desc = data["weather"][0]["description"].capitalize()
+                temp_c = round(data["main"]["temp"], 1)
+                temp_f = round(temp_c * 9 / 5 + 32, 1)
+                feels_c = round(data["main"]["feels_like"], 1)
+                humidity = data["main"]["humidity"]
+                wind_kmh = round(data["wind"]["speed"] * 3.6, 1)
+                name = data.get("name", city)
+                country = data.get("sys", {}).get("country", "")
+                result = (f"🌤️ Weather in {name}, {country}:\n"
+                          f"  {desc} — {temp_c}°C / {temp_f}°F  (feels like {feels_c}°C)\n"
+                          f"  💧 Humidity: {humidity}%   💨 Wind: {wind_kmh} km/h")
+                self._weather_cache[city.lower()] = (_time.time(), result)
+                return self.respond(f"{prefix}{result}")
+            except Exception:
+                pass  # Fall through to wttr.in
+
+        # Fallback: wttr.in (no key needed)
         try:
-            req = urllib.request.Request(f"https://wttr.in/{urllib.parse.quote(city)}?format=j1", headers={"User-Agent": "NickyAI/1.0"})
+            req = urllib.request.Request(
+                f"https://wttr.in/{urllib.parse.quote(city)}?format=j1",
+                headers={"User-Agent": "NickyAI/1.0"}
+            )
             with urllib.request.urlopen(req, timeout=8) as resp:
                 data = _json.loads(resp.read().decode())
             cur = data["current_condition"][0]
             area = data["nearest_area"][0]
-            return self.respond(f"{prefix}🌤️ Weather in {area['areaName'][0]['value']}, {area['country'][0]['value']}:\n  {cur['weatherDesc'][0]['value']} — {cur['temp_C']}°C / {cur['temp_F']}°F  (feels like {cur['FeelsLikeC']}°C)\n  💧 Humidity: {cur['humidity']}%   💨 Wind: {cur['windspeedKmph']} km/h")
+            result = (f"🌤️ Weather in {area['areaName'][0]['value']}, {area['country'][0]['value']}:\n"
+                      f"  {cur['weatherDesc'][0]['value']} — {cur['temp_C']}°C / {cur['temp_F']}°F"
+                      f"  (feels like {cur['FeelsLikeC']}°C)\n"
+                      f"  💧 Humidity: {cur['humidity']}%   💨 Wind: {cur['windspeedKmph']} km/h")
+            self._weather_cache[city.lower()] = (_time.time(), result)
+            return self.respond(f"{prefix}{result}")
         except Exception:
             return self.respond(f"{prefix}🌤️ Couldn't get weather for '{city}'.")
 
@@ -1203,6 +1597,238 @@ class Chatbot:
             return self.respond(f"{prefix}I remember {len(self.conversation_history)} interactions. Recent: {', '.join(recent)}")
         return self.respond(f"{prefix}No conversation history yet.")
 
+    def _cmd_user_profile_question(self, text, prefix=""):
+        """Answer questions about the user using user_memory facts."""
+        facts = self.user_memory.facts
+        t = text.lower()
+
+        # Map common question patterns to memory keys
+        _KEY_MAP = {
+            ("my name", "am i called", "i go by"):          "name",
+            ("my job", "my occupation", "what i do", "my work"): "occupation",
+            ("my hobby", "my hobbies", "what i like to do"): "hobbies",
+        }
+        for phrases, key in _KEY_MAP.items():
+            if any(p in t for p in phrases):
+                val = facts.get(key)
+                if val:
+                    return self.respond(f"{prefix}Your {key} is {val}.")
+                return self.respond(f"{prefix}I don't know your {key} yet. Tell me and I'll remember!")
+
+        # Generic — show all known facts
+        if facts:
+            lines = "\n".join(f"  {k}: {v}" for k, v in facts.items())
+            return self.respond(f"{prefix}Here's what I know about you:\n{lines}")
+
+        # Fall back to LLM with conversation context
+        result = self._ask_llm(text, system_prompt=self._get_ollama_system_prompt(text),
+                               history=self.ollama_history, print_prefix=f"[{self.name}] {prefix}")
+        if result is not None:
+            self._update_ollama_history(text, result)
+            self._last_streamed_text = result
+            return ""
+        return self.respond(f"{prefix}I don't have that info about you yet. Tell me and I'll remember!")
+
+    def _cmd_roast_mode(self, text, prefix=""):
+        self._roast_mode = True
+        self._compliment_mode = False
+        msgs = ["🔥 ROAST MODE ACTIVATED. Brace yourself — no one is safe. 😈",
+                "🔥 Roast Mode ON. I will NOT hold back. You asked for this. 😤",
+                "🔥 Challenge accepted. Let the roasting begin. 😈🔥"]
+        return self.respond(f"{prefix}{random.choice(msgs)}")
+
+    def _cmd_compliment_mode(self, text, prefix=""):
+        self._compliment_mode = True
+        self._roast_mode = False
+        msgs = ["💛 COMPLIMENT MODE ON. You are incredible, by the way. ✨",
+                "💛 Aww mode activated! Everything you do is amazing. 💛",
+                "💛 Compliment Mode engaged. You're basically a legend. 🌟"]
+        return self.respond(f"{prefix}{random.choice(msgs)}")
+
+    def _cmd_show_profile(self, prefix=""):
+        facts = self.user_memory.facts
+        if not facts:
+            return self.respond(f"{prefix}👤 I don't know much about you yet! Tell me your name, age, hobbies, etc.")
+        lines = ["👤 Your Profile Card:"]
+        labels = {"name": "Name",
+                  "description": "Description", "project": "Project",
+                  "likes": "Likes", "dislikes": "Dislikes", "hobbies": "Hobbies"}
+        for key, label in labels.items():
+            if key in facts:
+                val = facts[key]
+                if isinstance(val, list):
+                    val = ", ".join(val)
+                lines.append(f"  {label}: {val}")
+        for key, val in facts.items():
+            if key not in labels:
+                lines.append(f"  {key.title()}: {val}")
+        return self.respond(f"{prefix}" + "\n".join(lines))
+
+    def _cmd_kb_browser(self, text, prefix=""):
+        import re
+        t = text.lower().strip()
+        all_facts = list(self.knowledge.facts.items())
+
+        # "knowledge stats" — summary overview
+        if "stats" in t or "summary" in t or "overview" in t:
+            if not all_facts:
+                return self.respond(f"{prefix}🧠 Knowledge base is empty.")
+            cats: dict = {}
+            sources: dict = {}
+            for k, v in all_facts:
+                cat = v.get("category", "general") if isinstance(v, dict) else "general"
+                src = v.get("source", "user") if isinstance(v, dict) else "user"
+                cats[cat] = cats.get(cat, 0) + 1
+                sources[src] = sources.get(src, 0) + 1
+            cat_lines = "  ".join(f"{c}: {n}" for c, n in sorted(cats.items(), key=lambda x: -x[1]))
+            src_lines = "  ".join(f"{s}: {n}" for s, n in sorted(sources.items(), key=lambda x: -x[1]))
+            return self.respond(
+                f"{prefix}🧠 Knowledge Base Stats — {len(all_facts)} total facts\n"
+                f"  Categories: {cat_lines}\n"
+                f"  Sources:    {src_lines}"
+            )
+
+        # "knowledge [category]" — filter by category or keyword
+        cat_match = re.search(r'(?:show|browse|view|list|knowledge|facts|kb)(?:\s+(?:about|on|in))?\s+([a-z]\w+)', t)
+        category_filter = None
+        if cat_match:
+            word = cat_match.group(1).strip()
+            if word not in ("base", "knowledge", "facts", "kb", "all", "everything"):
+                category_filter = word
+
+        if category_filter:
+            filtered = [(k, v) for k, v in all_facts
+                        if category_filter in k.lower()
+                        or (isinstance(v, dict) and category_filter in v.get("category", "").lower())
+                        or (isinstance(v, dict) and category_filter in v.get("answer", "").lower())]
+        else:
+            filtered = all_facts
+
+        if not filtered:
+            msg = f"No facts found for '{category_filter}'." if category_filter else "Knowledge base is empty."
+            return self.respond(f"{prefix}🧠 {msg}")
+
+        limit = 25
+        lines = [f"🧠 Knowledge Base" + (f" — '{category_filter}'" if category_filter else "") + f" ({len(filtered)} fact{'s' if len(filtered) != 1 else ''}):"]
+        for k, v in filtered[:limit]:
+            if isinstance(v, dict):
+                answer = v.get("answer", "")
+                answer = (answer[:75] + "…") if len(answer) > 75 else answer
+                cat  = v.get("category", "general")
+                src  = v.get("source", "?")
+                conf = v.get("confidence", 1.0)
+                star = "★" if conf >= 0.9 else ("◆" if conf >= 0.6 else "◇")
+                lines.append(f"  {star} [{cat}] {k}\n       → {answer}  (src: {src})")
+            else:
+                val = str(v)
+                val = (val[:75] + "…") if len(val) > 75 else val
+                lines.append(f"  ★ [user] {k}\n       → {val}")
+        if len(filtered) > limit:
+            lines.append(f"  … and {len(filtered) - limit} more. Try 'knowledge [category]' to filter.")
+        lines.append("\n  💡 Tip: 'knowledge stats' · 'knowledge robotics' · 'knowledge ai'")
+        return self.respond(f"{prefix}" + "\n".join(lines))
+
+    def _cmd_history_search(self, text, prefix=""):
+        import re
+        m = re.search(r'search (?:history|chat)(?: for)?\s+(.+)', text.lower().strip())
+        if not m:
+            return self.respond(f"{prefix}🔍 Try: 'search history robots'")
+        term = m.group(1).strip()
+        matches = []
+        for entry in self.conversation_history:
+            user_msg = entry.get("user", "")
+            response = entry.get("response", "")
+            if term.lower() in user_msg.lower() or term.lower() in str(response).lower():
+                matches.append((entry.get("timestamp", ""), user_msg, response))
+        if not matches:
+            return self.respond(f"{prefix}🔍 No history found for '{term}'.")
+        lines = [f"🔍 Found {len(matches)} match{'es' if len(matches) > 1 else ''} for '{term}':"]
+        for ts, u, r in matches[-5:]:
+            u_short = u[:60] + ("..." if len(u) > 60 else "")
+            r_short = str(r)[:60] + ("..." if len(str(r)) > 60 else "")
+            if ts:
+                lines.append(f"  [{ts[:10]}] You: {u_short}")
+            else:
+                lines.append(f"  You: {u_short}")
+            lines.append(f"  Nicky: {r_short}")
+        return self.respond(f"{prefix}" + "\n".join(lines))
+
+    def _cmd_wake_word(self, enable: bool, prefix=""):
+        if enable:
+            ok = self.voice.start_wake_word_detection(lambda: None)
+            if ok:
+                return self.respond(f"{prefix}👂 Wake word detection ON. Say 'Hey Nicky' to activate me!")
+            return self.respond(f"{prefix}⚠️ Wake word detection unavailable. Make sure your microphone is connected.")
+        else:
+            self.voice.stop_wake_word_detection()
+            return self.respond(f"{prefix}💤 Wake word detection OFF.")
+
+    def _cmd_spotify(self, text, prefix=""):
+        if not self._spotify:
+            return self.respond(f"{prefix}🎵 YouTube Music unavailable. Run: pip install ytmusicapi")
+        import re
+        t = text.lower().strip()
+
+        # Volume
+        m = re.search(r'music volume (\d+)', t)
+        if m:
+            return self.respond(f"{prefix}{self._spotify.set_volume(int(m.group(1)))}")
+
+        if any(p in t for p in ("what is playing", "what's playing", "now playing")):
+            return self.respond(f"{prefix}{self._spotify.get_now_playing()}")
+        if any(p in t for p in ("next song", "skip song", "next track")):
+            return self.respond(f"{prefix}{self._spotify.next_track()}")
+        if any(p in t for p in ("previous song", "prev song", "previous track")):
+            return self.respond(f"{prefix}{self._spotify.prev_track()}")
+        if any(p in t for p in ("pause music", "pause")):
+            return self.respond(f"{prefix}{self._spotify.play_pause()}")
+        if any(p in t for p in ("open youtube music", "open yt music", "youtube music")):
+            return self.respond(f"{prefix}{self._spotify.open_home()}")
+
+        # Search and play — strip common suffixes
+        for pat in (r'play (.+?) on (?:youtube music|yt music)', r'play (.+?) by ', r'play (.+)'):
+            m = re.search(pat, t)
+            if m:
+                query = m.group(1).strip().rstrip(".")
+                return self.respond(f"{prefix}{self._spotify.search_and_play(query)}")
+
+        return self.respond(f"{prefix}🎵 {self._spotify.get_now_playing()}")
+
+    def _cmd_calendar(self, text, prefix=""):
+        if not self._calendar:
+            return self.respond(f"{prefix}📅 Calendar not available.")
+        import re
+        t = text.lower().strip()
+
+        # Delete event
+        m = re.search(r'(?:delete|remove) event (\w+)', t)
+        if m:
+            return self.respond(f"{prefix}{self._calendar.delete_event(m.group(1))}")
+
+        # List events
+        if any(p in t for p in ("events today", "calendar today", "my schedule today", "what is on my calendar today", "what's on my calendar today")):
+            return self.respond(f"{prefix}{self._calendar.list_events('today')}")
+        if any(p in t for p in ("events this week", "calendar this week", "what is on my calendar", "what's on my calendar", "my schedule", "upcoming events", "events next week")):
+            return self.respond(f"{prefix}{self._calendar.list_events('week')}")
+        if "all events" in t or "full calendar" in t:
+            return self.respond(f"{prefix}{self._calendar.list_events('all')}")
+
+        # Add event — parse "add event [title] on [date] at [time]"
+        patterns = [
+            r'(?:add event|schedule|add to calendar)\s+(.+?)\s+on\s+(.+?)\s+at\s+(.+)',
+            r'(?:add event|schedule|add to calendar)\s+(.+?)\s+on\s+(.+)',
+            r'(?:add event|schedule)\s+(.+)',
+        ]
+        for i, pat in enumerate(patterns):
+            m = re.search(pat, t)
+            if m:
+                title = m.group(1).strip().rstrip(".")
+                date_text = m.group(2).strip() if m.lastindex >= 2 else "today"
+                time_text = m.group(3).strip() if m.lastindex >= 3 else ""
+                return self.respond(f"{prefix}{self._calendar.add_event(title, date_text, time_text)}")
+
+        return self.respond(f"{prefix}{self._calendar.list_events('today')}")
+
     def _cmd_throw(self, text, prefix=""):
         direction = self._extract_direction(text)
         target = self.arm_state.get("holding")
@@ -1232,6 +1858,332 @@ class Chatbot:
         names = sorted([obj["name"].lower() for obj in self.environment.objects], key=len, reverse=True)
         return [n for n in names if n in text.lower()]
 
+    # ── V2 New Feature Handlers ────────────────────────────────────────────
+
+    def _cmd_unit_convert(self, text, prefix=""):
+        import re
+        t = text.lower().strip()
+        conversions = {
+            # length
+            ("km", "miles"):      lambda v: (v * 0.621371, f"{v} km = {v * 0.621371:.4g} miles"),
+            ("miles", "km"):      lambda v: (v * 1.60934,  f"{v} miles = {v * 1.60934:.4g} km"),
+            ("m", "feet"):        lambda v: (v * 3.28084,  f"{v} m = {v * 3.28084:.4g} feet"),
+            ("feet", "m"):        lambda v: (v * 0.3048,   f"{v} feet = {v * 0.3048:.4g} m"),
+            ("meters", "feet"):   lambda v: (v * 3.28084,  f"{v} m = {v * 3.28084:.4g} feet"),
+            ("feet", "meters"):   lambda v: (v * 0.3048,   f"{v} feet = {v * 0.3048:.4g} m"),
+            ("cm", "inches"):     lambda v: (v * 0.393701, f"{v} cm = {v * 0.393701:.4g} inches"),
+            ("inches", "cm"):     lambda v: (v * 2.54,     f"{v} inches = {v * 2.54:.4g} cm"),
+            # weight
+            ("kg", "lbs"):        lambda v: (v * 2.20462,  f"{v} kg = {v * 2.20462:.4g} lbs"),
+            ("lbs", "kg"):        lambda v: (v * 0.453592, f"{v} lbs = {v * 0.453592:.4g} kg"),
+            ("g", "oz"):          lambda v: (v * 0.035274, f"{v} g = {v * 0.035274:.4g} oz"),
+            ("oz", "g"):          lambda v: (v * 28.3495,  f"{v} oz = {v * 28.3495:.4g} g"),
+            # temperature
+            ("celsius", "fahrenheit"): lambda v: (v*9/5+32, f"{v}°C = {v*9/5+32:.4g}°F"),
+            ("fahrenheit", "celsius"): lambda v: ((v-32)*5/9, f"{v}°F = {(v-32)*5/9:.4g}°C"),
+            ("c", "f"):           lambda v: (v*9/5+32, f"{v}°C = {v*9/5+32:.4g}°F"),
+            ("f", "c"):           lambda v: ((v-32)*5/9, f"{v}°F = {(v-32)*5/9:.4g}°C"),
+            # volume
+            ("liters", "gallons"):  lambda v: (v * 0.264172, f"{v} L = {v * 0.264172:.4g} gal"),
+            ("gallons", "liters"):  lambda v: (v * 3.78541,  f"{v} gal = {v * 3.78541:.4g} L"),
+            ("ml", "fl oz"):        lambda v: (v * 0.033814, f"{v} ml = {v * 0.033814:.4g} fl oz"),
+            # speed
+            ("mph", "kph"):        lambda v: (v * 1.60934, f"{v} mph = {v * 1.60934:.4g} kph"),
+            ("kph", "mph"):        lambda v: (v * 0.621371, f"{v} kph = {v * 0.621371:.4g} mph"),
+            ("km/h", "mph"):       lambda v: (v * 0.621371, f"{v} km/h = {v * 0.621371:.4g} mph"),
+        }
+        num_m = re.search(r'(-?\d+\.?\d*)', t)
+        if not num_m:
+            return self.respond(f"{prefix}📐 Try: 'convert 100 km to miles' or '30 celsius to fahrenheit'")
+        val = float(num_m.group(1))
+        for (from_u, to_u), fn in conversions.items():
+            if from_u in t and to_u in t:
+                _, msg = fn(val)
+                return self.respond(f"{prefix}📐 {msg}")
+        return self.respond(f"{prefix}📐 I don't know that conversion. Try: km↔miles, kg↔lbs, celsius↔fahrenheit, liters↔gallons, mph↔kph")
+
+    def _cmd_system_info(self, text, prefix=""):
+        t = text.lower()
+        lines = [f"{prefix}💻 System Info:"]
+        try:
+            import psutil
+            if any(x in t for x in ("cpu", "processor", "system info", "pc stats", "computer stats")):
+                cpu = psutil.cpu_percent(interval=0.5)
+                lines.append(f"  🔲 CPU: {cpu}%")
+            if any(x in t for x in ("ram", "memory", "system info", "pc stats", "computer stats")):
+                ram = psutil.virtual_memory()
+                used_gb = ram.used / (1024**3)
+                total_gb = ram.total / (1024**3)
+                lines.append(f"  🧠 RAM: {used_gb:.1f} / {total_gb:.1f} GB ({ram.percent}%)")
+            if any(x in t for x in ("disk", "storage", "system info", "pc stats", "computer stats")):
+                disk = psutil.disk_usage("/")
+                lines.append(f"  💾 Disk: {disk.used/(1024**3):.1f} / {disk.total/(1024**3):.1f} GB ({disk.percent}%)")
+            if any(x in t for x in ("battery", "system info", "pc stats", "computer stats")):
+                batt = psutil.sensors_battery()
+                if batt:
+                    plug = "🔌 plugged in" if batt.power_plugged else "🔋 on battery"
+                    lines.append(f"  🔋 Battery: {batt.percent:.0f}% ({plug})")
+                else:
+                    lines.append("  🔋 Battery: not detected (desktop?)")
+        except ImportError:
+            lines.append("  ⚠️ psutil not installed — run: pip install psutil")
+        except Exception as e:
+            lines.append(f"  ⚠️ Could not read stats: {e}")
+        return self.respond("\n".join(lines))
+
+    def _cmd_notes(self, text, prefix=""):
+        import re, os as _os, json as _json
+        notes_path = _os.path.join(self.data_dir, "notes.json")
+        try:
+            with open(notes_path) as f:
+                notes = _json.load(f)
+        except Exception:
+            notes = []
+
+        def _save(n):
+            try:
+                with open(notes_path, "w") as f:
+                    _json.dump(n, f, indent=2)
+            except Exception:
+                pass
+
+        t = text.lower().strip()
+        # Add note
+        for pat in (r'(?:take a note|jot down|write a note|note that|note:?)\s*:?\s*(.+)',):
+            m = re.search(pat, t, re.IGNORECASE)
+            if m:
+                note = m.group(1).strip()
+                notes.append({"text": note, "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M")})
+                _save(notes)
+                return self.respond(f"{prefix}📝 Note saved: \"{note}\"")
+        # Delete
+        m = re.search(r'delete note (\d+)', t)
+        if m:
+            idx = int(m.group(1)) - 1
+            if 0 <= idx < len(notes):
+                removed = notes.pop(idx)["text"]
+                _save(notes)
+                return self.respond(f"{prefix}🗑️ Deleted note {m.group(1)}: \"{removed}\"")
+            return self.respond(f"{prefix}📝 Note #{m.group(1)} doesn't exist.")
+        # Clear
+        if "clear" in t:
+            notes.clear(); _save(notes)
+            return self.respond(f"{prefix}🗑️ All notes cleared.")
+        # Read
+        if not notes:
+            return self.respond(f"{prefix}📝 No notes yet. Try: 'take a note: pick up milk'")
+        lines = [f"{prefix}📝 Your Notes ({len(notes)}):"]
+        for i, n in enumerate(notes, 1):
+            ts = f" [{n['timestamp']}]" if n.get("timestamp") else ""
+            lines.append(f"  {i}. {n['text']}{ts}")
+        return self.respond("\n".join(lines))
+
+    def _cmd_clipboard(self, text, prefix=""):
+        t = text.lower().strip()
+        try:
+            import subprocess
+            if "read" in t or "what" in t or "show" in t:
+                result = subprocess.run(
+                    ["powershell", "-Command", "Get-Clipboard"],
+                    capture_output=True, text=True, timeout=5
+                )
+                content = result.stdout.strip()
+                if content:
+                    return self.respond(f"{prefix}📋 Clipboard: \"{content[:200]}{'...' if len(content) > 200 else ''}\"")
+                return self.respond(f"{prefix}📋 Clipboard is empty.")
+            # copy X to clipboard
+            import re
+            m = re.search(r'copy\s+(.+?)\s+to clipboard', t)
+            if m:
+                text_to_copy = m.group(1).strip()
+                subprocess.run(
+                    ["powershell", "-Command", f"Set-Clipboard -Value '{text_to_copy}'"],
+                    capture_output=True, timeout=5
+                )
+                return self.respond(f"{prefix}📋 Copied to clipboard: \"{text_to_copy}\"")
+        except Exception as e:
+            return self.respond(f"{prefix}📋 Clipboard unavailable: {e}")
+        return self.respond(f"{prefix}📋 Try: 'copy hello world to clipboard' or 'read my clipboard'")
+
+    def _cmd_random(self, text, prefix=""):
+        import re, random as _rand
+        t = text.lower().strip()
+        # Dice: roll Nd6, roll 2d20, etc.
+        m = re.search(r'roll\s+(\d+)d(\d+)', t)
+        if m:
+            count, sides = int(m.group(1)), int(m.group(2))
+            count = min(count, 20)
+            rolls = [_rand.randint(1, sides) for _ in range(count)]
+            total = sum(rolls)
+            roll_str = " + ".join(str(r) for r in rolls) if count > 1 else str(rolls[0])
+            return self.respond(f"{prefix}🎲 Rolled {count}d{sides}: {roll_str} = **{total}**")
+        if any(x in t for x in ("roll a dice", "roll dice", "roll a die", "roll d6")):
+            r = _rand.randint(1, 6)
+            return self.respond(f"{prefix}🎲 Rolled a d6: **{r}**")
+        if any(x in t for x in ("flip a coin", "flip coin", "heads or tails")):
+            result = _rand.choice(["Heads 🪙", "Tails 🌕"])
+            return self.respond(f"{prefix}🪙 **{result}**!")
+        # Random number between X and Y
+        m = re.search(r'(?:random (?:number )?between|pick a number between|number between)\s+(\d+)\s+and\s+(\d+)', t)
+        if m:
+            lo, hi = int(m.group(1)), int(m.group(2))
+            if lo > hi: lo, hi = hi, lo
+            return self.respond(f"{prefix}🎲 Random number between {lo} and {hi}: **{_rand.randint(lo, hi)}**")
+        m = re.search(r'random number', t)
+        if m:
+            return self.respond(f"{prefix}🎲 Random number (1-100): **{_rand.randint(1, 100)}**")
+        if any(x in t for x in ("random color", "random colour", "pick a random color")):
+            r, g, b = _rand.randint(0, 255), _rand.randint(0, 255), _rand.randint(0, 255)
+            hex_color = f"#{r:02X}{g:02X}{b:02X}"
+            return self.respond(f"{prefix}🎨 Random color: **{hex_color}** (R:{r} G:{g} B:{b})")
+        return self.respond(f"{prefix}🎲 Try: 'roll a dice', 'flip a coin', 'random number between 1 and 100', 'roll 2d20'")
+
+    def _cmd_timezone(self, text, prefix=""):
+        import re, urllib.request, json as _json
+        m = re.search(r'(?:what time is it in|current time in|time in|what\'s the time in)\s+(.+)', text.lower().strip())
+        if not m:
+            return self.respond(f"{prefix}🕐 Try: 'what time is it in Tokyo'")
+        city = m.group(1).strip().rstrip("?.")
+        try:
+            url = f"https://worldtimeapi.org/api/timezone"
+            # Use wttr.in timezone endpoint as a simple fallback
+            req = urllib.request.Request(
+                f"https://timeapi.io/api/Time/current/zone?timeZone={urllib.request.quote(city)}",
+                headers={"Accept": "application/json"}
+            )
+            with urllib.request.urlopen(req, timeout=6) as resp:
+                data = _json.loads(resp.read().decode())
+            time_str = data.get("time", "")
+            date_str = data.get("date", "")
+            tz = data.get("timeZone", city)
+            return self.respond(f"{prefix}🕐 Time in {tz}: **{time_str}** on {date_str}")
+        except Exception:
+            pass
+        # Fallback using common IANA timezone names
+        _TZ_MAP = {
+            "tokyo": "Asia/Tokyo", "japan": "Asia/Tokyo",
+            "london": "Europe/London", "uk": "Europe/London",
+            "paris": "Europe/Paris", "france": "Europe/Paris",
+            "new york": "America/New_York", "nyc": "America/New_York",
+            "los angeles": "America/Los_Angeles", "la": "America/Los_Angeles",
+            "chicago": "America/Chicago",
+            "dubai": "Asia/Dubai", "uae": "Asia/Dubai",
+            "sydney": "Australia/Sydney", "australia": "Australia/Sydney",
+            "beijing": "Asia/Shanghai", "shanghai": "Asia/Shanghai", "china": "Asia/Shanghai",
+            "moscow": "Europe/Moscow", "russia": "Europe/Moscow",
+            "berlin": "Europe/Berlin", "germany": "Europe/Berlin",
+            "india": "Asia/Kolkata", "delhi": "Asia/Kolkata", "mumbai": "Asia/Kolkata",
+            "toronto": "America/Toronto", "canada": "America/Toronto",
+        }
+        try:
+            import datetime as _dt
+            from zoneinfo import ZoneInfo
+            iana = _TZ_MAP.get(city.lower())
+            if iana:
+                now = _dt.datetime.now(ZoneInfo(iana))
+                return self.respond(f"{prefix}🕐 Time in {city.title()}: **{now.strftime('%H:%M:%S')}** ({now.strftime('%A, %B %d')})")
+        except Exception:
+            pass
+        return self.respond(f"{prefix}🕐 Couldn't find timezone for '{city}'. Try a major city name like 'Tokyo' or 'London'.")
+
+    def _cmd_network(self, text, prefix=""):
+        import urllib.request, socket
+        t = text.lower()
+        lines = [f"{prefix}🌐 Network Status:"]
+        # Internet check
+        try:
+            urllib.request.urlopen("https://www.google.com", timeout=3)
+            lines.append("  ✅ Internet: Connected")
+        except Exception:
+            lines.append("  ❌ Internet: Not connected")
+        # Local IP
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            local_ip = s.getsockname()[0]
+            s.close()
+            lines.append(f"  🏠 Local IP: {local_ip}")
+        except Exception:
+            lines.append("  🏠 Local IP: unavailable")
+        # Public IP (only if asked specifically)
+        if "public" in t or "external" in t or "ip" in t:
+            try:
+                with urllib.request.urlopen("https://api.ipify.org", timeout=4) as r:
+                    public_ip = r.read().decode().strip()
+                lines.append(f"  🌍 Public IP: {public_ip}")
+            except Exception:
+                lines.append("  🌍 Public IP: unavailable")
+        return self.respond("\n".join(lines))
+
+    def _cmd_export_history(self, prefix=""):
+        import os as _os
+        from datetime import datetime as _dt
+        if not self.conversation_history:
+            return self.respond(f"{prefix}📄 No conversation history to export.")
+        desktop = _os.path.join(_os.path.expanduser("~"), "Desktop")
+        ts = _dt.now().strftime("%Y%m%d_%H%M%S")
+        path = _os.path.join(desktop, f"nicky_chat_{ts}.txt")
+        try:
+            lines = [f"Nicky AI — Chat Export — {_dt.now().strftime('%B %d, %Y %H:%M')}\n{'='*60}\n"]
+            for entry in self.conversation_history:
+                user_msg = entry.get("user", "")
+                response = entry.get("response", "")
+                ts_str = entry.get("timestamp", "")
+                if user_msg:
+                    lines.append(f"[{ts_str}] You: {user_msg}")
+                if response:
+                    lines.append(f"Nicky: {response}\n")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("\n".join(lines))
+            return self.respond(f"{prefix}📄 Chat history exported: nicky_chat_{ts}.txt (on your Desktop)")
+        except Exception as e:
+            return self.respond(f"{prefix}📄 Export failed: {e}")
+
+    def _cmd_password_gen(self, text, prefix=""):
+        import re, secrets, string
+        t = text.lower()
+        m = re.search(r'(\d+)\s*(?:character|char|digit|letter)', t)
+        length = int(m.group(1)) if m else 16
+        length = max(8, min(length, 64))
+        has_symbols = not any(x in t for x in ("no symbols", "no special", "letters only", "alphanumeric"))
+        chars = string.ascii_letters + string.digits
+        if has_symbols:
+            chars += "!@#$%^&*()-_=+[]{}|;:,.<>?"
+        password = "".join(secrets.choice(chars) for _ in range(length))
+        strength = "🔴 Weak" if length < 10 else ("🟡 Medium" if length < 14 else "🟢 Strong")
+        return self.respond(f"{prefix}🔑 Generated password ({length} chars, {strength}):\n  **{password}**\n  ⚠️ Copy it now — it won't be saved.")
+
+    def _cmd_weather_forecast(self, text, prefix=""):
+        import re, urllib.request, urllib.parse, json as _json
+        m = re.search(r'(?:forecast for|weather forecast for?|forecast in)\s+(.+)', text.lower().strip())
+        if not m:
+            # Try just "weather forecast [city]"
+            m = re.search(r'weather forecast\s+(.+)', text.lower().strip())
+        if not m:
+            return self.respond(f"{prefix}🌤️ Which city? Try: 'weather forecast for London'")
+        city = m.group(1).strip().rstrip("?.")
+        try:
+            req = urllib.request.Request(
+                f"https://wttr.in/{urllib.parse.quote(city)}?format=j1",
+                headers={"User-Agent": "NickyAI/2.0"}
+            )
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                data = _json.loads(resp.read().decode())
+            area = data["nearest_area"][0]
+            city_name = f"{area['areaName'][0]['value']}, {area['country'][0]['value']}"
+            days = data.get("weather", [])[:3]
+            lines = [f"{prefix}📅 3-Day Forecast for {city_name}:"]
+            for day in days:
+                date = day["date"]
+                max_c = day["maxtempC"]; min_c = day["mintempC"]
+                max_f = day["maxtempF"]; min_f = day["mintempF"]
+                desc = day["hourly"][4]["weatherDesc"][0]["value"] if day.get("hourly") else "N/A"
+                lines.append(f"  📆 {date}: {desc}")
+                lines.append(f"     High {max_c}°C/{max_f}°F  ↓ Low {min_c}°C/{min_f}°F")
+            return self.respond("\n".join(lines))
+        except Exception:
+            return self.respond(f"{prefix}🌤️ Couldn't get forecast for '{city}'.")
+
     def respond(self, message):
         formatted = f"[{self.name}] {message}"
         if self.conversation_history and "user" in self.conversation_history[-1]:
@@ -1243,7 +2195,14 @@ class Chatbot:
     def _prompt(self):
         emoji = self._MOOD_EMOJI.get(self.personality.mood, "😐")
         mode_tag = "💬" if self.mode == "casual" else "🔧"
-        return f"{mode_tag}{emoji} You: "
+        extras = ""
+        if self._roast_mode:
+            extras += "🔥"
+        elif self._compliment_mode:
+            extras += "💛"
+        if self.custom_personality.traits:
+            extras += f"[{','.join(self.custom_personality.traits[:2])}]"
+        return f"{mode_tag}{emoji}{extras} You: "
 
     def chat(self):
         print(f"\n{'='*50}")
@@ -1253,27 +2212,82 @@ class Chatbot:
         if self.user_memory.facts.get("name"):
             print(f"Welcome back, {self.user_memory.facts['name']}!")
         print(f"Active mode: {'💬 Casual Mode' if self.mode == 'casual' else '🔧 Workshop Mode'}")
-        print("Say 'voice on' to hear responses spoken\n")
+        print("Say 'voice on' to hear responses spoken")
+        print("Say 'wake word on' to enable always-listening mode\n")
+
+        # Wake-word trigger flag — set by callback from background thread
+        _wake_triggered = _threading.Event()
+
+        def _on_wake_word():
+            _wake_triggered.set()
+
+        import time as _time
+        _last_reminder_check = _time.time()
+
         while True:
             try:
+                # ── Reminder check every 60 s ─────────────────────────────
+                if self._calendar and (_time.time() - _last_reminder_check) >= 60:
+                    _last_reminder_check = _time.time()
+                    due = self._calendar.get_reminders_due(window_minutes=15)
+                    for ev in due:
+                        msg = f"⏰ Reminder: '{ev['title']}'" + (f" at {ev['time']}" if ev.get("time") else "")
+                        print(f"\n{msg}")
+                        if self.voice.voice_enabled:
+                            self.voice.speak(msg)
+                        self._calendar.mark_reminded(ev["id"])
+
                 prompt = self._prompt()
-                if self.voice.voice_enabled and self.voice._mic_available:
+
+                # ── Wake word mode ────────────────────────────────────────
+                wake_detector = getattr(self.voice, "_wake_detector", None)
+                if wake_detector and wake_detector.is_active:
+                    print(f"\r💤 {prompt}(say 'Hey Nicky' to activate)  ", end="", flush=True)
+                    # Wait up to 0.5 s for wake word, then re-check reminders
+                    if not _wake_triggered.wait(timeout=0.5):
+                        continue
+                    _wake_triggered.clear()
+                    print("\r" + " " * 60 + "\r", end="", flush=True)
+                    print("👂 Wake word detected! Listening...")
                     user_input = self.voice.listen()
+                    if user_input:
+                        print(f"{prompt}{user_input}")
+                    else:
+                        continue
+
+                elif self.voice.voice_enabled and self.voice._mic_available:
+                    print("\r🎤 Listening...          ", end="", flush=True)
+                    user_input = self.voice.listen()
+                    print("\r" + " " * 28 + "\r", end="", flush=True)
                     if user_input:
                         print(f"{prompt}{user_input}")
                     else:
                         user_input = input(prompt).strip()
                 else:
                     user_input = input(prompt).strip()
+
                 if not user_input:
                     continue
                 if user_input.lower() in ("quit", "exit"):
                     self._save_data()
+                    self.voice.stop_wake_word_detection()
                     goodbye = self.respond('Powering down. Farewell.')
                     print(goodbye)
                     if self.voice.voice_enabled:
                         self.voice.speak("Powering down. Farewell.")
                     break
+
+                # Handle wake word toggle inside chat loop
+                if "wake word on" in user_input.lower():
+                    ok = self.voice.start_wake_word_detection(_on_wake_word)
+                    msg = "👂 Wake word ON — say 'Hey Nicky' to activate!" if ok else "⚠️ Wake word unavailable."
+                    print(msg)
+                    continue
+                if "wake word off" in user_input.lower():
+                    self.voice.stop_wake_word_detection()
+                    print("💤 Wake word OFF.")
+                    continue
+
                 self._last_streamed_text = ""
                 response = self.process_command(user_input)
                 if response:
@@ -1281,7 +2295,11 @@ class Chatbot:
                 if self.voice.voice_enabled:
                     text_to_speak = self._last_streamed_text if not response else response.replace(f"[{self.name}] ", "")
                     if text_to_speak:
+                        print("[🔊 Speaking...]", end="\r", flush=True)
                         self.voice.speak(text_to_speak)
+                        print(" " * 20, end="\r", flush=True)
             except KeyboardInterrupt:
+                self.voice.stop_wake_word_detection()
                 print(f"\n{self.respond('Interrupted. Standby mode activated.')}")
                 break
+

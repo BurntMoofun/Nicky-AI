@@ -196,3 +196,19 @@ class VoiceSystem:
     def test_speech(self):
         """Speak a short test phrase so the user can confirm TTS is working."""
         return self.speak("Voice mode activated. I can hear you.")
+
+    def start_wake_word_detection(self, callback) -> bool:
+        """Start background wake-word listener. Returns True if started."""
+        try:
+            from wakeword import WakeWordDetector
+            if not hasattr(self, "_wake_detector") or self._wake_detector is None:
+                self._wake_detector = WakeWordDetector()
+            return self._wake_detector.start(callback)
+        except Exception:
+            return False
+
+    def stop_wake_word_detection(self):
+        """Stop the wake-word listener if running."""
+        detector = getattr(self, "_wake_detector", None)
+        if detector:
+            detector.stop()

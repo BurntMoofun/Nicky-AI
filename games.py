@@ -992,3 +992,775 @@ class PongGame:
 
     def run(self):
         self.root.mainloop()
+
+
+# ── New Games ─────────────────────────────────────────────────────────────────
+
+
+class WordleGame:
+    """Nicky picks a 5-letter word; player has 6 guesses with green/yellow/gray feedback."""
+
+    WORDS = [
+        "brain", "crane", "flame", "ghost", "handy", "kneel", "lemon", "magic",
+        "noble", "otter", "plumb", "raven", "slash", "tiger", "ultra", "vivid",
+        "weird", "yacht", "zebra", "abode", "blaze", "crisp", "drown", "ember",
+        "frost", "groan", "haste", "ivory", "joust", "kitty", "lodge", "mirth",
+        "nerve", "olive", "prism", "ridge", "stamp", "those", "usher", "vault",
+        "waltz", "exact", "yearn", "adorn", "brisk", "chunk", "dodge", "elite",
+        "flung", "glint", "humid", "index", "jumpy", "knack", "lofty", "mercy",
+        "nudge", "orbit", "plead", "queen", "realm", "sweet", "thank", "untie",
+        "verse", "waste", "yield", "swift", "draft", "fault", "gripe", "ozone",
+    ]
+    COLS, ROWS, CELL, PAD = 5, 6, 60, 10
+
+    def __init__(self, nicky_say=None):
+        self._say = nicky_say or (lambda msg: print(f"[Nicky] {msg}"))
+        self._word = random.choice(self.WORDS).upper()
+        self._guesses = []
+        self._game_over = False
+        W = self.COLS * (self.CELL + self.PAD) + self.PAD
+        H = self.ROWS * (self.CELL + self.PAD) + self.PAD
+        self.root = _tk.Tk()
+        self.root.title("Nicky's Wordle 🟩")
+        self.root.resizable(False, False)
+        self.root.configure(bg="#121213")
+        self.canvas = _tk.Canvas(self.root, width=W, height=H, bg="#121213", highlightthickness=0)
+        self.canvas.pack(pady=5)
+        input_frame = _tk.Frame(self.root, bg="#121213")
+        input_frame.pack(fill="x", padx=10, pady=5)
+        self.entry = _tk.Entry(input_frame, font=("Arial", 18, "bold"), width=8,
+                               bg="#1a1a1b", fg="white", insertbackground="white", justify="center")
+        self.entry.pack(side="left", padx=(0, 10))
+        self.entry.bind("<Return>", self._on_guess)
+        _tk.Button(input_frame, text="Guess", command=self._on_guess,
+                   bg="#538d4e", fg="white", font=("Arial", 14, "bold"),
+                   relief="flat", padx=12).pack(side="left")
+        self.status_var = _tk.StringVar(value="Type a 5-letter word and press Enter!")
+        _tk.Label(self.root, textvariable=self.status_var,
+                  bg="#121213", fg="#d7dadc", font=("Arial", 11)).pack(pady=3)
+        self._draw()
+        self._say("Let's play Wordle! I'm thinking of a 5-letter word. You have 6 guesses. 🟩")
+        self.root.mainloop()
+
+    def _on_guess(self, event=None):
+        if self._game_over:
+            return
+        guess = self.entry.get().strip().upper()
+        self.entry.delete(0, _tk.END)
+        if len(guess) != 5 or not guess.isalpha():
+            self.status_var.set("❌ Must be exactly 5 letters!")
+            return
+        colors = self._score_guess(guess)
+        self._guesses.append((guess, colors))
+        self._draw()
+        if guess == self._word:
+            self._game_over = True
+            self.status_var.set(f"🎉 CORRECT! You got it in {len(self._guesses)}!")
+            self._say(f"YES! You got it in {len(self._guesses)} guess{'es' if len(self._guesses)>1 else ''}! The word was {self._word}!")
+        elif len(self._guesses) >= self.ROWS:
+            self._game_over = True
+            self.status_var.set(f"😔 Game over! The word was {self._word}")
+            self._say(f"Aww, no luck! The word was '{self._word}'. Better luck next time!")
+        else:
+            remaining = self.ROWS - len(self._guesses)
+            self.status_var.set(f"{remaining} guess{'es' if remaining != 1 else ''} remaining")
+            if len(self._guesses) == 3:
+                self._say("Halfway there! Keep thinking...")
+            elif len(self._guesses) == 5:
+                self._say("Last chance! Make it count!")
+
+    def _score_guess(self, guess):
+        colors = ["gray"] * 5
+        word_chars = list(self._word)
+        guess_chars = list(guess)
+        for i in range(5):
+            if guess_chars[i] == word_chars[i]:
+                colors[i] = "green"
+                word_chars[i] = None
+                guess_chars[i] = None
+        for i in range(5):
+            if guess_chars[i] is None:
+                continue
+            if guess_chars[i] in word_chars:
+                colors[i] = "yellow"
+                word_chars[word_chars.index(guess_chars[i])] = None
+        return colors
+
+    def _draw(self):
+        self.canvas.delete("all")
+        COLOR_MAP  = {"green": "#538d4e", "yellow": "#b59f3b", "gray": "#3a3a3c", "empty": "#121213"}
+        BORDER_MAP = {"green": "#538d4e", "yellow": "#b59f3b", "gray": "#565758",  "empty": "#565758"}
+        for row in range(self.ROWS):
+            for col in range(self.COLS):
+                x = self.PAD + col * (self.CELL + self.PAD)
+                y = self.PAD + row * (self.CELL + self.PAD)
+                if row < len(self._guesses):
+                    letter, color = self._guesses[row][0][col], self._guesses[row][1][col]
+                else:
+                    letter, color = "", "empty"
+                self.canvas.create_rectangle(x, y, x + self.CELL, y + self.CELL,
+                                             fill=COLOR_MAP[color], outline=BORDER_MAP[color], width=2)
+                if letter:
+                    self.canvas.create_text(x + self.CELL // 2, y + self.CELL // 2,
+                                            text=letter, font=("Arial", 24, "bold"), fill="white")
+
+    def run(self):
+        self.root.mainloop()
+
+
+class BlackjackGame:
+    """Classic Blackjack — player vs Nicky dealer."""
+
+    SUITS  = ["♠", "♥", "♦", "♣"]
+    RANKS  = ["A","2","3","4","5","6","7","8","9","10","J","Q","K"]
+    VALUES = {"A":11,"2":2,"3":3,"4":4,"5":5,"6":6,"7":7,"8":8,"9":9,"10":10,"J":10,"Q":10,"K":10}
+
+    def __init__(self, nicky_say=None):
+        self._say = nicky_say or (lambda msg: print(f"[Nicky] {msg}"))
+        self._balance = 100
+        self._bet = 10
+        self._deck = []
+        self._player_hand = []
+        self._dealer_hand = []
+        self._game_active = False
+        self.root = _tk.Tk()
+        self.root.title("Nicky's Blackjack 🃏")
+        self.root.configure(bg="#076324")
+        self.root.resizable(False, False)
+        top = _tk.Frame(self.root, bg="#076324")
+        top.pack(fill="x", padx=15, pady=8)
+        self.balance_var = _tk.StringVar(value="💰 Balance: $100")
+        _tk.Label(top, textvariable=self.balance_var, bg="#076324", fg="#FFD700", font=("Arial", 14, "bold")).pack(side="left")
+        self.bet_var = _tk.StringVar(value="🎯 Bet: $10")
+        _tk.Label(top, textvariable=self.bet_var, bg="#076324", fg="white", font=("Arial", 12)).pack(side="right")
+        self.canvas = _tk.Canvas(self.root, width=500, height=300, bg="#076324", highlightthickness=0)
+        self.canvas.pack(padx=15, pady=5)
+        self.status_var = _tk.StringVar(value="Press 'Deal' to start!")
+        _tk.Label(self.root, textvariable=self.status_var, bg="#076324", fg="white", font=("Arial", 12)).pack(pady=3)
+        btn_frame = _tk.Frame(self.root, bg="#076324")
+        btn_frame.pack(pady=8)
+        s = {"font": ("Arial", 12, "bold"), "relief": "raised", "width": 8, "padx": 6}
+        _tk.Button(btn_frame, text="Deal",  command=self._deal,  bg="#c8a855", fg="black", **s).grid(row=0, column=0, padx=5)
+        _tk.Button(btn_frame, text="Hit",   command=self._hit,   bg="#2ea04e", fg="white", **s).grid(row=0, column=1, padx=5)
+        _tk.Button(btn_frame, text="Stand", command=self._stand, bg="#c0392b", fg="white", **s).grid(row=0, column=2, padx=5)
+        bet_frame = _tk.Frame(self.root, bg="#076324")
+        bet_frame.pack(pady=3)
+        _tk.Label(bet_frame, text="Bet: $", bg="#076324", fg="white", font=("Arial", 11)).pack(side="left")
+        self.bet_entry = _tk.Entry(bet_frame, width=6, font=("Arial", 11),
+                                   bg="#1a5c30", fg="white", insertbackground="white")
+        self.bet_entry.insert(0, "10")
+        self.bet_entry.pack(side="left")
+        self._draw_table()
+        self._say("Welcome to Blackjack! Get closer to 21 than me without going over. 🃏")
+        self.root.mainloop()
+
+    def _new_deck(self):
+        self._deck = [(r, s) for r in self.RANKS for s in self.SUITS] * 2
+        random.shuffle(self._deck)
+
+    def _deal(self):
+        try:
+            self._bet = max(1, min(int(self.bet_entry.get()), self._balance))
+        except ValueError:
+            self._bet = 10
+        self.bet_var.set(f"🎯 Bet: ${self._bet}")
+        if self._balance <= 0:
+            self.status_var.set("You're out of money! Game over.")
+            return
+        self._new_deck()
+        self._player_hand = [self._deck.pop(), self._deck.pop()]
+        self._dealer_hand = [self._deck.pop(), self._deck.pop()]
+        self._game_active = True
+        self._draw_table()
+        if self._hand_value(self._player_hand) == 21:
+            self._end_round("blackjack")
+        else:
+            self.status_var.set(f"Your score: {self._hand_value(self._player_hand)} — Hit or Stand?")
+
+    def _hit(self):
+        if not self._game_active:
+            return
+        self._player_hand.append(self._deck.pop())
+        self._draw_table()
+        p = self._hand_value(self._player_hand)
+        if p > 21:
+            self._end_round("bust")
+        elif p == 21:
+            self._stand()
+        else:
+            self.status_var.set(f"Your score: {p} — Hit or Stand?")
+
+    def _stand(self):
+        if not self._game_active:
+            return
+        while self._hand_value(self._dealer_hand) < 17:
+            self._dealer_hand.append(self._deck.pop())
+        self._draw_table(reveal=True)
+        p, d = self._hand_value(self._player_hand), self._hand_value(self._dealer_hand)
+        if d > 21 or p > d:
+            self._end_round("win")
+        elif p == d:
+            self._end_round("push")
+        else:
+            self._end_round("lose")
+
+    def _end_round(self, result):
+        self._game_active = False
+        if result == "blackjack":
+            w = int(self._bet * 1.5)
+            self._balance += w
+            msg, say = f"🎉 BLACKJACK! +${w}", f"Blackjack! You win ${w}!"
+        elif result == "win":
+            self._balance += self._bet
+            msg, say = f"✅ You win ${self._bet}!", random.choice(["Nice hand!", "You beat me.", "Ugh, you win this one."])
+        elif result == "push":
+            msg, say = "🤝 Push — bet returned!", "We tied!"
+        elif result == "bust":
+            self._balance -= self._bet
+            msg, say = f"💥 Bust! -${self._bet}", random.choice(["Over 21! Too greedy.", "Bust!"])
+        else:
+            self._balance -= self._bet
+            msg, say = f"❌ Dealer wins. -${self._bet}", random.choice(["I win! 😏", "Better luck next time."])
+        self.balance_var.set(f"💰 Balance: ${self._balance}")
+        self.status_var.set(msg + " — Press Deal to play again!")
+        self._draw_table(reveal=True)
+        self._say(say)
+
+    def _hand_value(self, hand):
+        total = sum(self.VALUES[r] for r, s in hand)
+        aces = sum(1 for r, s in hand if r == "A")
+        while total > 21 and aces:
+            total -= 10
+            aces -= 1
+        return total
+
+    def _draw_table(self, reveal=False):
+        self.canvas.delete("all")
+        CW, CH = 60, 90
+
+        def draw_card(x, y, card, hidden=False):
+            self.canvas.create_rectangle(x, y, x + CW, y + CH, fill="white", outline="#ddd", width=2)
+            if hidden:
+                self.canvas.create_rectangle(x + 3, y + 3, x + CW - 3, y + CH - 3, fill="#1e6b9e", outline="")
+                self.canvas.create_text(x + CW // 2, y + CH // 2, text="?", font=("Arial", 28, "bold"), fill="#aaa")
+            else:
+                color = "#c0392b" if card[1] in ("♥", "♦") else "#1a1a2e"
+                self.canvas.create_text(x + 5, y + 5, text=card[0], anchor="nw", font=("Arial", 14, "bold"), fill=color)
+                self.canvas.create_text(x + CW // 2, y + CH // 2, text=card[1], font=("Arial", 22), fill=color)
+
+        self.canvas.create_text(20, 15, text="Dealer:", anchor="w", font=("Arial", 12, "bold"), fill="white")
+        for i, card in enumerate(self._dealer_hand):
+            draw_card(20 + i * (CW + 8), 35, card, hidden=(i == 1 and not reveal and self._game_active))
+        if self._dealer_hand:
+            vis = str(self._hand_value(self._dealer_hand)) if (reveal or not self._game_active) else f"{self.VALUES[self._dealer_hand[0][0]]}+"
+            self.canvas.create_text(20 + len(self._dealer_hand) * (CW + 8) + 10, 80,
+                                    text=f"Score: {vis}", anchor="w", font=("Arial", 11), fill="#FFD700")
+        self.canvas.create_text(20, 165, text="You:", anchor="w", font=("Arial", 12, "bold"), fill="white")
+        for i, card in enumerate(self._player_hand):
+            draw_card(20 + i * (CW + 8), 185, card)
+        if self._player_hand:
+            self.canvas.create_text(20 + len(self._player_hand) * (CW + 8) + 10, 230,
+                                    text=f"Score: {self._hand_value(self._player_hand)}",
+                                    anchor="w", font=("Arial", 11), fill="#FFD700")
+
+    def run(self):
+        self.root.mainloop()
+
+
+class Game2048:
+    """Classic 2048 — slide tiles with arrow keys to merge and reach 2048."""
+
+    SIZE = 4
+    CELL, PAD = 100, 12
+    COLORS = {0: "#cdc1b4", 2: "#eee4da", 4: "#ede0c8", 8: "#f2b179", 16: "#f59563",
+              32: "#f67c5f", 64: "#f65e3b", 128: "#edcf72", 256: "#edcc61",
+              512: "#edc850", 1024: "#edc53f", 2048: "#edc22e"}
+    TEXT_DARK = {2: "#776e65", 4: "#776e65"}
+
+    def __init__(self, nicky_say=None):
+        self._say = nicky_say or (lambda msg: print(f"[Nicky] {msg}"))
+        self._board = [[0] * self.SIZE for _ in range(self.SIZE)]
+        self._score = 0
+        self._game_over = False
+        W = self.SIZE * (self.CELL + self.PAD) + self.PAD
+        self.root = _tk.Tk()
+        self.root.title("2048 🎮")
+        self.root.resizable(False, False)
+        self.root.configure(bg="#bbada0")
+        top = _tk.Frame(self.root, bg="#bbada0")
+        top.pack(fill="x", padx=10, pady=5)
+        _tk.Label(top, text="2048", bg="#bbada0", fg="#f9f6f2", font=("Arial", 24, "bold")).pack(side="left")
+        self.score_var = _tk.StringVar(value="Score: 0")
+        _tk.Label(top, textvariable=self.score_var, bg="#bbada0", fg="white", font=("Arial", 13, "bold")).pack(side="right")
+        self.canvas = _tk.Canvas(self.root, width=W, height=W, bg="#bbada0", highlightthickness=0)
+        self.canvas.pack(padx=10)
+        self.status_var = _tk.StringVar(value="Use arrow keys!")
+        _tk.Label(self.root, textvariable=self.status_var, bg="#bbada0", fg="#776e65", font=("Arial", 11)).pack(pady=5)
+        self._add_tile()
+        self._add_tile()
+        self._draw()
+        for key, direction in (("<Left>","left"),("<Right>","right"),("<Up>","up"),("<Down>","down")):
+            self.root.bind(key, lambda e, d=direction: self._move(d))
+        self._say("2048! Use arrow keys to slide tiles. Merge matching numbers to reach 2048! 🎮")
+        self.root.mainloop()
+
+    def _add_tile(self):
+        empty = [(r, c) for r in range(self.SIZE) for c in range(self.SIZE) if self._board[r][c] == 0]
+        if empty:
+            r, c = random.choice(empty)
+            self._board[r][c] = 4 if random.random() < 0.1 else 2
+
+    def _slide_row(self, row):
+        nums = [x for x in row if x != 0]
+        merged, skip = [], False
+        for i in range(len(nums)):
+            if skip:
+                skip = False
+                continue
+            if i + 1 < len(nums) and nums[i] == nums[i + 1]:
+                val = nums[i] * 2
+                merged.append(val)
+                self._score += val
+                skip = True
+            else:
+                merged.append(nums[i])
+        return merged + [0] * (self.SIZE - len(merged))
+
+    def _move(self, direction):
+        if self._game_over:
+            return
+        old = [row[:] for row in self._board]
+        if direction == "left":
+            self._board = [self._slide_row(row) for row in self._board]
+        elif direction == "right":
+            self._board = [self._slide_row(row[::-1])[::-1] for row in self._board]
+        elif direction == "up":
+            t = [[self._board[r][c] for r in range(self.SIZE)] for c in range(self.SIZE)]
+            s = [self._slide_row(col) for col in t]
+            self._board = [[s[c][r] for c in range(self.SIZE)] for r in range(self.SIZE)]
+        elif direction == "down":
+            t = [[self._board[r][c] for r in range(self.SIZE)] for c in range(self.SIZE)]
+            s = [self._slide_row(col[::-1])[::-1] for col in t]
+            self._board = [[s[c][r] for c in range(self.SIZE)] for r in range(self.SIZE)]
+        if self._board != old:
+            self._add_tile()
+            self._draw()
+            max_tile = max(max(row) for row in self._board)
+            milestones = {256:"256! Keep merging!", 512:"512! You're good at this!",
+                          1024:"1024! SO close!", 2048:"2048!!! YOU WIN! 🎉🏆"}
+            if max_tile in milestones:
+                self._say(milestones[max_tile])
+            if not self._can_move():
+                self._game_over = True
+                self.status_var.set(f"Game Over! Score: {self._score}")
+                self._say(f"Game over! Final score: {self._score}!")
+
+    def _can_move(self):
+        for r in range(self.SIZE):
+            for c in range(self.SIZE):
+                if self._board[r][c] == 0:
+                    return True
+                if r + 1 < self.SIZE and self._board[r][c] == self._board[r + 1][c]:
+                    return True
+                if c + 1 < self.SIZE and self._board[r][c] == self._board[r][c + 1]:
+                    return True
+        return False
+
+    def _draw(self):
+        self.canvas.delete("all")
+        self.score_var.set(f"Score: {self._score}")
+        for r in range(self.SIZE):
+            for c in range(self.SIZE):
+                x = self.PAD + c * (self.CELL + self.PAD)
+                y = self.PAD + r * (self.CELL + self.PAD)
+                val = self._board[r][c]
+                bg = self.COLORS.get(val, "#3d3a33")
+                fg = self.TEXT_DARK.get(val, "#f9f6f2")
+                self.canvas.create_rectangle(x, y, x + self.CELL, y + self.CELL, fill=bg, outline="", width=0)
+                if val:
+                    fs = 28 if val < 1000 else 22 if val < 10000 else 18
+                    self.canvas.create_text(x + self.CELL // 2, y + self.CELL // 2,
+                                            text=str(val), font=("Arial", fs, "bold"), fill=fg)
+
+    def run(self):
+        self.root.mainloop()
+
+
+class SimonSaysGame:
+    """Simon Says — watch the color sequence and repeat it."""
+
+    COLORS = ["red", "blue", "green", "yellow"]
+    DARK   = {"red": "#5c0000", "blue": "#00005c", "green": "#005c00", "yellow": "#5c5c00"}
+    BRIGHT = {"red": "#ff4444", "blue": "#4444ff", "green": "#44ff44", "yellow": "#ffff44"}
+
+    def __init__(self, nicky_say=None):
+        self._say = nicky_say or (lambda msg: print(f"[Nicky] {msg}"))
+        self._sequence = []
+        self._player_pos = 0
+        self._player_turn = False
+        self.root = _tk.Tk()
+        self.root.title("Simon Says 🎯")
+        self.root.configure(bg="#1a1a2e")
+        self.root.resizable(False, False)
+        self.score_var = _tk.StringVar(value="Level: 0")
+        _tk.Label(self.root, textvariable=self.score_var, bg="#1a1a2e", fg="white", font=("Arial", 16, "bold")).pack(pady=10)
+        grid_frame = _tk.Frame(self.root, bg="#1a1a2e")
+        grid_frame.pack(padx=20, pady=10)
+        self._buttons = {}
+        for color, row, col in [("red",0,0),("blue",0,1),("green",1,0),("yellow",1,1)]:
+            btn = _tk.Button(grid_frame, bg=self.DARK[color], activebackground=self.BRIGHT[color],
+                             width=10, height=5, relief="raised", bd=4,
+                             command=lambda c=color: self._on_player_press(c))
+            btn.grid(row=row, column=col, padx=8, pady=8)
+            self._buttons[color] = btn
+        self.status_var = _tk.StringVar(value="Press Start!")
+        _tk.Label(self.root, textvariable=self.status_var, bg="#1a1a2e", fg="#aaa", font=("Arial", 11)).pack(pady=5)
+        _tk.Button(self.root, text="▶ Start", command=self._start_round,
+                   bg="#2ea04e", fg="white", font=("Arial", 13, "bold"), relief="flat", padx=20, pady=6).pack(pady=8)
+        self._say("Simon Says! Watch the colors, then repeat the pattern. 🎯")
+        self.root.mainloop()
+
+    def _start_round(self):
+        self._sequence.append(random.choice(self.COLORS))
+        level = len(self._sequence)
+        self.score_var.set(f"Level: {level}")
+        self.status_var.set("Watch carefully...")
+        self._player_turn = False
+        self.root.after(600, self._play_sequence)
+
+    def _play_sequence(self, idx=0):
+        if idx < len(self._sequence):
+            self._flash(self._sequence[idx])
+            self.root.after(900, lambda: self._play_sequence(idx + 1))
+        else:
+            self._player_pos = 0
+            self._player_turn = True
+            self.status_var.set("Your turn! Repeat the pattern.")
+            level = len(self._sequence)
+            if level == 1:
+                self._say("Now you repeat it!")
+            elif level % 5 == 0:
+                self._say(f"Level {level}! You're on fire! 🔥")
+
+    def _flash(self, color, duration=400):
+        self._buttons[color].configure(bg=self.BRIGHT[color])
+        self.root.after(duration, lambda: self._buttons[color].configure(bg=self.DARK[color]))
+
+    def _on_player_press(self, color):
+        if not self._player_turn:
+            return
+        self._flash(color, 200)
+        if color == self._sequence[self._player_pos]:
+            self._player_pos += 1
+            if self._player_pos == len(self._sequence):
+                self._player_turn = False
+                level = len(self._sequence)
+                self.status_var.set(f"✅ Level {level} complete!")
+                self._say(random.choice(["Correct! Next level...", "Perfect! Keep going!", "Nailed it!"]))
+                self.root.after(1200, self._start_round)
+        else:
+            self._player_turn = False
+            level = len(self._sequence)
+            self.status_var.set(f"❌ Wrong! Game over — reached level {level}!")
+            self._say(f"Oops! Wrong button. You made it to level {level}!")
+            self.root.after(2000, self._reset_game)
+
+    def _reset_game(self):
+        self._sequence = []
+        self.score_var.set("Level: 0")
+        self.status_var.set("Press Start for a new game!")
+
+    def run(self):
+        self.root.mainloop()
+
+
+class MinesweeperGame:
+    """Nicky solves Minesweeper autonomously using constraint-satisfaction logic."""
+
+    ROWS, COLS, MINES, CELL = 9, 9, 10, 45
+
+    def __init__(self, nicky_say=None):
+        self._say = nicky_say or (lambda msg: print(f"[Nicky] {msg}"))
+        self._mines = set()
+        self._revealed = set()
+        self._flagged = set()
+        self._numbers = {}
+        self._game_over = False
+        self._won = False
+        W = self.COLS * self.CELL + 20
+        self.root = _tk.Tk()
+        self.root.title("Nicky solves Minesweeper 💣")
+        self.root.resizable(False, False)
+        self.root.configure(bg="#c0c0c0")
+        top = _tk.Frame(self.root, bg="#c0c0c0")
+        top.pack(fill="x", padx=10, pady=5)
+        self.status_var = _tk.StringVar(value="Press '🔍 Solve' to watch Nicky go!")
+        _tk.Label(top, textvariable=self.status_var, bg="#c0c0c0", fg="#333", font=("Arial", 11, "bold")).pack(side="left")
+        self.flag_var = _tk.StringVar(value="🚩 0")
+        _tk.Label(top, textvariable=self.flag_var, bg="#c0c0c0", fg="#c0392b", font=("Arial", 12, "bold")).pack(side="right")
+        self.canvas = _tk.Canvas(self.root, width=W, height=self.ROWS * self.CELL, bg="#c0c0c0", highlightthickness=0)
+        self.canvas.pack(padx=10)
+        btn_frame = _tk.Frame(self.root, bg="#c0c0c0")
+        btn_frame.pack(pady=5)
+        _tk.Button(btn_frame, text="🔍 Solve",    command=self._start_solve, bg="#4a90d9", fg="white", font=("Arial", 12, "bold"), relief="flat", padx=15).pack(side="left", padx=5)
+        _tk.Button(btn_frame, text="🔄 New Game", command=self._new_game,    bg="#666",    fg="white", font=("Arial", 12, "bold"), relief="flat", padx=15).pack(side="left", padx=5)
+        self._new_game()
+        self._say("Let me solve Minesweeper using constraint logic! 💣")
+        self.root.mainloop()
+
+    def _new_game(self):
+        self._mines = set()
+        self._revealed = set()
+        self._flagged = set()
+        self._numbers = {}
+        self._game_over = False
+        self._won = False
+        self.status_var.set("Press '🔍 Solve' to watch Nicky go!")
+        self._draw()
+
+    def _place_mines(self, sr, sc):
+        safe = {(sr + dr, sc + dc) for dr in range(-1, 2) for dc in range(-1, 2)
+                if 0 <= sr + dr < self.ROWS and 0 <= sc + dc < self.COLS}
+        candidates = [(r, c) for r in range(self.ROWS) for c in range(self.COLS) if (r, c) not in safe]
+        self._mines = set(random.sample(candidates, min(self.MINES, len(candidates))))
+        for r in range(self.ROWS):
+            for c in range(self.COLS):
+                if (r, c) not in self._mines:
+                    self._numbers[(r, c)] = sum(1 for nr, nc in self._neighbors(r, c) if (nr, nc) in self._mines)
+
+    def _neighbors(self, r, c):
+        return [(r + dr, c + dc) for dr in (-1, 0, 1) for dc in (-1, 0, 1)
+                if (dr or dc) and 0 <= r + dr < self.ROWS and 0 <= c + dc < self.COLS]
+
+    def _reveal(self, r, c):
+        if (r, c) in self._revealed or (r, c) in self._flagged:
+            return
+        if (r, c) in self._mines:
+            self._game_over = True
+            return
+        self._revealed.add((r, c))
+        if self._numbers.get((r, c), 0) == 0:
+            for nr, nc in self._neighbors(r, c):
+                self._reveal(nr, nc)
+
+    def _start_solve(self):
+        if self._game_over or self._won:
+            self._new_game()
+            return
+        if not self._mines:
+            sr, sc = self.ROWS // 2, self.COLS // 2
+            self._place_mines(sr, sc)
+            self._reveal(sr, sc)
+            self._draw()
+            self._say("Starting from center — safest first move!")
+        self.root.after(500, self._solver_step)
+
+    def _solver_step(self):
+        if self._game_over or self._won:
+            return
+        for (r, c) in list(self._revealed):
+            num = self._numbers.get((r, c), 0)
+            if num == 0:
+                continue
+            unknown = [(nr, nc) for nr, nc in self._neighbors(r, c)
+                       if (nr, nc) not in self._revealed and (nr, nc) not in self._flagged]
+            flagged_adj = [nb for nb in self._neighbors(r, c) if nb in self._flagged]
+            remaining = num - len(flagged_adj)
+            if remaining == len(unknown) and unknown:
+                for cell in unknown:
+                    self._flagged.add(cell)
+                self.flag_var.set(f"🚩 {len(self._flagged)}")
+                self._draw()
+                self.status_var.set(f"Flagging mines around ({r},{c}) 🚩")
+                self.root.after(500, self._solver_step)
+                return
+            if remaining == 0 and unknown:
+                for nr, nc in unknown:
+                    self._reveal(nr, nc)
+                self._draw()
+                self.status_var.set(f"Safe to reveal around ({r},{c}) ✅")
+                self.root.after(500, self._solver_step)
+                return
+        if len(self._revealed) == self.ROWS * self.COLS - self.MINES:
+            self._won = True
+            self.status_var.set("🎉 Solved! Nicky wins!")
+            self._say("I solved it! Every mine identified! 🎉")
+            self._draw()
+            return
+        # Stuck — make a guess
+        unrevealed = [(r, c) for r in range(self.ROWS) for c in range(self.COLS)
+                      if (r, c) not in self._revealed and (r, c) not in self._flagged]
+        if unrevealed:
+            adjacent = [cell for cell in unrevealed
+                        if any(nb in self._revealed for nb in self._neighbors(*cell))]
+            pick = random.choice(adjacent if adjacent else unrevealed)
+            self._say(f"Logic stuck — guessing ({pick[0]},{pick[1]})... 🤞")
+            self.status_var.set(f"Guessing at ({pick[0]},{pick[1]})...")
+            self._reveal(*pick)
+            self._draw()
+            if self._game_over:
+                self.status_var.set("💥 Hit a mine! Restarting...")
+                self._say("Hit a mine! That's what guessing gets you. Starting fresh!")
+                self.root.after(2000, self._new_game)
+                return
+            self.root.after(500, self._solver_step)
+
+    def _draw(self):
+        self.canvas.delete("all")
+        NUM_COLORS = {1:"#0000ff",2:"#008000",3:"#ff0000",4:"#000080",
+                      5:"#800000",6:"#008080",7:"#000000",8:"#808080"}
+        for r in range(self.ROWS):
+            for c in range(self.COLS):
+                x, y = 10 + c * self.CELL, r * self.CELL
+                cell = (r, c)
+                if cell in self._revealed:
+                    num = self._numbers.get(cell, 0)
+                    self.canvas.create_rectangle(x, y, x + self.CELL - 2, y + self.CELL - 2, fill="#e0e0e0", outline="#aaa")
+                    if num:
+                        self.canvas.create_text(x + self.CELL // 2, y + self.CELL // 2,
+                                                text=str(num), font=("Arial", 16, "bold"),
+                                                fill=NUM_COLORS.get(num, "#000"))
+                elif cell in self._flagged:
+                    self.canvas.create_rectangle(x, y, x + self.CELL - 2, y + self.CELL - 2, fill="#c0c0c0", outline="#888")
+                    self.canvas.create_text(x + self.CELL // 2, y + self.CELL // 2, text="🚩", font=("Arial", 18))
+                else:
+                    self.canvas.create_rectangle(x, y, x + self.CELL - 2, y + self.CELL - 2, fill="#c0c0c0", outline="#888", width=2)
+
+    def run(self):
+        self.root.mainloop()
+
+
+class SudokuGame:
+    """Nicky solves a Sudoku puzzle live using backtracking with commentary."""
+
+    PUZZLES = [
+        [[5,3,0,0,7,0,0,0,0],[6,0,0,1,9,5,0,0,0],[0,9,8,0,0,0,0,6,0],
+         [8,0,0,0,6,0,0,0,3],[4,0,0,8,0,3,0,0,1],[7,0,0,0,2,0,0,0,6],
+         [0,6,0,0,0,0,2,8,0],[0,0,0,4,1,9,0,0,5],[0,0,0,0,8,0,0,7,9]],
+        [[0,0,0,2,6,0,7,0,1],[6,8,0,0,7,0,0,9,0],[1,9,0,0,0,4,5,0,0],
+         [8,2,0,1,0,0,0,4,0],[0,0,4,6,0,2,9,0,0],[0,5,0,0,0,3,0,2,8],
+         [0,0,9,3,0,0,0,7,4],[0,4,0,0,5,0,0,3,6],[7,0,3,0,1,8,0,0,0]],
+    ]
+    CELL = 55
+
+    def __init__(self, nicky_say=None):
+        self._say = nicky_say or (lambda msg: print(f"[Nicky] {msg}"))
+        template = random.choice(self.PUZZLES)
+        self._board = [row[:] for row in template]
+        self._original = [row[:] for row in template]
+        self._solving = False
+        self._gen = None
+        self._steps = 0
+        W = 9 * self.CELL + 20
+        self.root = _tk.Tk()
+        self.root.title("Nicky's Sudoku Solver 🧩")
+        self.root.resizable(False, False)
+        self.root.configure(bg="#f5f5f5")
+        _tk.Label(self.root, text="Nicky's Sudoku Solver 🧩",
+                  bg="#f5f5f5", font=("Arial", 14, "bold"), fg="#333").pack(pady=5)
+        self.canvas = _tk.Canvas(self.root, width=W, height=9 * self.CELL + 10,
+                                 bg="white", highlightthickness=1, highlightbackground="#999")
+        self.canvas.pack(padx=10)
+        self.status_var = _tk.StringVar(value="Press 'Solve' to watch me work!")
+        _tk.Label(self.root, textvariable=self.status_var, bg="#f5f5f5", fg="#555", font=("Arial", 10)).pack(pady=3)
+        btn_frame = _tk.Frame(self.root, bg="#f5f5f5")
+        btn_frame.pack(pady=5)
+        _tk.Button(btn_frame, text="▶ Solve",       command=self._start_solve, bg="#6c63ff", fg="white", font=("Arial", 12, "bold"), relief="flat", padx=15).pack(side="left", padx=5)
+        _tk.Button(btn_frame, text="🔄 New Puzzle", command=self._new_puzzle,  bg="#666",    fg="white", font=("Arial", 12, "bold"), relief="flat", padx=15).pack(side="left", padx=5)
+        self._draw()
+        self._say("Sudoku time! I'll use backtracking — try numbers, back up when stuck. 🧩")
+        self.root.mainloop()
+
+    def _new_puzzle(self):
+        template = random.choice(self.PUZZLES)
+        self._board = [row[:] for row in template]
+        self._original = [row[:] for row in template]
+        self._solving = False
+        self._gen = None
+        self._steps = 0
+        self.status_var.set("Press 'Solve' to watch me work!")
+        self._draw()
+
+    def _is_valid(self, board, r, c, num):
+        if num in board[r]:
+            return False
+        if any(board[i][c] == num for i in range(9)):
+            return False
+        br, bc = (r // 3) * 3, (c // 3) * 3
+        return not any(board[i][j] == num for i in range(br, br + 3) for j in range(bc, bc + 3))
+
+    def _backtrack(self, board):
+        for r in range(9):
+            for c in range(9):
+                if board[r][c] == 0:
+                    for num in range(1, 10):
+                        if self._is_valid(board, r, c, num):
+                            board[r][c] = num
+                            yield (r, c, True)
+                            result = yield from self._backtrack(board)
+                            if result:
+                                return True
+                            board[r][c] = 0
+                            yield (r, c, False)
+                    return False
+        return True
+
+    def _start_solve(self):
+        if self._solving:
+            return
+        self._solving = True
+        self._board = [row[:] for row in self._original]
+        self._steps = 0
+        self._gen = self._backtrack(self._board)
+        self._say("Here we go — backtracking in action!")
+        self.status_var.set("Solving...")
+        self.root.after(20, self._step_solve)
+
+    def _step_solve(self):
+        if not self._solving or self._gen is None:
+            return
+        try:
+            r, c, placed = next(self._gen)
+            self._steps += 1
+            self._draw(highlight=(r, c), placed=placed)
+            if self._steps % 100 == 0:
+                self.status_var.set(f"Step {self._steps}...")
+            if self._steps == 200:
+                self._say("200 steps and still going — this puzzle is tough!")
+            speed = max(1, 15 - self._steps // 50)
+            self.root.after(speed, self._step_solve)
+        except StopIteration:
+            self._solving = False
+            solved = all(self._board[r][c] != 0 for r in range(9) for c in range(9))
+            if solved:
+                self.status_var.set(f"✅ Solved in {self._steps} steps!")
+                self._say(f"Solved! Took {self._steps} steps. I'm a Sudoku machine! 🧩✅")
+            else:
+                self.status_var.set("❌ No solution found.")
+            self._draw()
+
+    def _draw(self, highlight=None, placed=True):
+        self.canvas.delete("all")
+        for r in range(9):
+            for c in range(9):
+                x = 10 + c * self.CELL
+                y = 5 + r * self.CELL
+                bg = "white"
+                if highlight and (r, c) == highlight:
+                    bg = "#aaffaa" if placed else "#ffaaaa"
+                self.canvas.create_rectangle(x, y, x + self.CELL, y + self.CELL, fill=bg, outline="#ccc")
+                val = self._board[r][c]
+                if val:
+                    orig = self._original[r][c]
+                    color = "#333" if orig else ("#2060c0" if placed else "#c02020")
+                    weight = "bold" if orig else "normal"
+                    self.canvas.create_text(x + self.CELL // 2, y + self.CELL // 2,
+                                            text=str(val), font=("Arial", 18, weight), fill=color)
+        for i in range(4):
+            x = 10 + i * 3 * self.CELL
+            self.canvas.create_line(x, 5, x, 5 + 9 * self.CELL, width=3, fill="#333")
+            y = 5 + i * 3 * self.CELL
+            self.canvas.create_line(10, y, 10 + 9 * self.CELL, y, width=3, fill="#333")
+
+    def run(self):
+        self.root.mainloop()
