@@ -500,11 +500,14 @@ class VoiceSystem:
                     tmp_path = f.name
 
                 asyncio.run(_synthesize(text, self.TTS_VOICE, tmp_path))
-                data, sample_rate = sf.read(tmp_path, dtype="float32")
-                sd.play(data, sample_rate)
-                sd.wait()
-                os.unlink(tmp_path)
-                return True
+                try:
+                    data, sample_rate = sf.read(tmp_path, dtype="float32")
+                    sd.play(data, sample_rate)
+                    sd.wait()
+                    return True
+                finally:
+                    if os.path.exists(tmp_path):
+                        os.unlink(tmp_path)
 
             except ImportError:
                 pass
@@ -514,7 +517,7 @@ class VoiceSystem:
             # Attempt 2: Windows SAPI via PowerShell
             try:
                 import subprocess
-                safe_text = text.replace('"', '').replace("'", "")
+                safe_text = text.replace('"', '').replace("'", "").replace('$', '').replace('`', '').replace(';', '')
                 result = subprocess.run(
                     ["powershell", "-Command",
                      f'Add-Type -AssemblyName System.Speech; '
@@ -602,7 +605,8 @@ class VoiceSystem:
         except sr.RequestError:
             print("[Voice] Speech recognition service unavailable.")
             return None
-        except Exception:
+        except Exception as e:
+            print(f"[Voice] Unexpected listen() error: {e}")
             return None
 
     def enable_voice(self):
@@ -3039,7 +3043,6 @@ class Chatbot:
         # Voice
         elif intent == "voice_on":
             result = self.voice.enable_voice()
-            self.voice.speak("Voice mode activated.")
             return self.respond(result)
         elif intent == "voice_off":
             return self.respond(self.voice.disable_voice())
