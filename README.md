@@ -56,29 +56,101 @@
 
 ---
 
-## 🚀 Quick Start
+## 🚀 Installation & Setup (Step by Step)
 
-### 1. Install Ollama
-Download from [ollama.com](https://ollama.com) and pull a model:
-```bash
-ollama pull llama3
-```
+### Step 1 — Install Python 3.10+
+1. Go to [python.org/downloads](https://www.python.org/downloads/)
+2. Download the latest **Python 3.10+** installer for Windows
+3. Run the installer — **check "Add Python to PATH"** before clicking Install
+4. Verify it worked by opening a terminal and running:
+   ```bash
+   python --version
+   ```
+   You should see something like `Python 3.11.x`
 
-### 2. Clone the repo
+---
+
+### Step 2 — Install Git
+1. Go to [git-scm.com/downloads](https://git-scm.com/downloads)
+2. Download and run the Windows installer (leave all defaults as-is)
+3. Verify:
+   ```bash
+   git --version
+   ```
+
+---
+
+### Step 3 — Clone the Repo
+Open a terminal (Command Prompt or PowerShell) and run:
 ```bash
-git clone https://github.com/YOUR_USERNAME/nicky-ai.git
+git clone https://github.com/BurntMoofun/nicky-ai.git
 cd nicky-ai
 ```
 
-### 3. Install dependencies
+---
+
+### Step 4 — Install Python Dependencies
+Inside the `nicky-ai` folder, run:
 ```bash
 pip install -r requirements.txt
 ```
+This installs all of the following automatically:
 
-### 4. Run Nicky
+| Package | What it's for |
+|---|---|
+| `pyttsx3` | Text-to-speech (Nicky's voice) |
+| `SpeechRecognition` | Microphone/voice input |
+| `sounddevice` + `soundfile` | Audio playback |
+| `edge-tts` | Higher quality TTS voice option |
+| `wikipedia` | Wikipedia lookups |
+| `matplotlib` | Workspace visualization / graphs |
+| `sentence-transformers` | Smarter understanding of your questions |
+| `torch` | Required by sentence-transformers (PyTorch) |
+| `numpy` | Math/array support |
+| `ddgs` | DuckDuckGo web search |
+
+> ⚠️ **Note on `torch`:** PyTorch is a large download (~200–500MB). This is normal — just let it run.
+
+---
+
+### Step 5 — Install Ollama (the AI brain)
+> Without this, Nicky still runs but gives basic pre-written responses instead of real AI answers.
+
+1. Go to [ollama.com](https://ollama.com) and click **Download for Windows**
+2. Run the installer
+3. Once installed, open a terminal and run:
+   ```bash
+   ollama pull llama3.2
+   ```
+   > ⚠️ This downloads the AI model — about **2GB**. Wait for it to finish.
+4. Ollama runs automatically in the background after install. To verify:
+   ```bash
+   ollama list
+   ```
+   You should see `llama3.2` in the list.
+
+---
+
+### Step 6 — Run Nicky
 ```bash
 python main.py
 ```
+
+That's it! Nicky will start up and you can begin chatting.
+
+---
+
+### ❓ Troubleshooting
+
+**`pip` not recognized** → Make sure you checked "Add Python to PATH" during install. Re-install Python if needed.
+
+**`torch` install fails** → Try: `pip install torch --index-url https://download.pytorch.org/whl/cpu`
+
+**Ollama not responding** → Make sure Ollama is running. Open the Start menu and launch **Ollama**, or run `ollama serve` in a terminal.
+
+**No voice output** → `pyttsx3` requires Windows. Make sure your speakers aren't muted and you're on Windows.
+
+**Microphone not working** → Voice input is optional. Just type your messages instead.
 
 ---
 
