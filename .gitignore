@@ -32,7 +32,9 @@ test_audio.py
 test_features.py
 verify_syntax.py
 
-# Secrets / env vars
+# Large binaries — not needed in cloud deploy
+cloudflared.exe
+*.exe
 .env
 *.env
 secrets.json
