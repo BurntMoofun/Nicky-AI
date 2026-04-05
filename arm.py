@@ -1,7 +1,11 @@
 try:
-    from sentence_transformers import SentenceTransformer
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    from sklearn.metrics.pairwise import cosine_similarity
+    _SKLEARN_OK = True
 except ImportError:
-    SentenceTransformer = None
+    _SKLEARN_OK = False
+    TfidfVectorizer = None
+    cosine_similarity = None
 
 
 # Virtual Environment - represents the workspace
@@ -312,6 +316,38 @@ class NLUEngine:
             "silent mode", "turn off voice", "mute", "audio off",
             "disable speech", "stop talking", "be quiet", "go silent"
         ],
+        "window_on": [
+            "window", "open window", "show window", "avatar window",
+            "open avatar", "show avatar", "display window", "nicky window",
+            "pop up window", "show the window"
+        ],
+        "window_off": [
+            "close window", "hide window", "close avatar", "hide avatar",
+            "shut window", "dismiss window", "remove window"
+        ],
+        "monitor_on": [
+            "monitor on", "screen monitor", "watch my screen", "look at my screen",
+            "enable monitor", "start watching", "screen mode on", "enable screen watch",
+            "keep an eye on my screen", "monitor mode"
+        ],
+        "monitor_off": [
+            "monitor off", "stop watching", "stop monitoring", "screen mode off",
+            "disable monitor", "stop looking at my screen", "close monitor"
+        ],
+        "screen_look": [
+            "what do you see", "describe my screen", "look at this",
+            "what's on my screen", "what am i looking at", "check my screen",
+            "what's open", "read my screen", "analyze my screen",
+            "what can you see", "take a look", "screen check"
+        ],
+        "proactive_on": [
+            "proactive on", "be proactive", "speak up", "talk to me randomly",
+            "start talking", "check in on me", "enable proactive", "talk freely"
+        ],
+        "proactive_off": [
+            "proactive off", "stop talking randomly", "be quiet unless asked",
+            "disable proactive", "stop checking in", "only talk when spoken to"
+        ],
         "place_on": [
             "place on top of", "put on top of", "stack on", "place on",
             "put on", "set on top of", "stack the", "put it on top",
@@ -362,54 +398,39 @@ class NLUEngine:
         self.model = None
         self._all_examples = []
         self._all_labels = []
-        self._embeddings = None
-        self._np = None
+        self._vectorizer = None
+        self._matrix = None
         self._model_ready = False
-        # Load model in background so Nicky starts instantly
+        # Load in background — near-instant with sklearn (no torch needed)
         import threading as _t
         _t.Thread(target=self._load_model, daemon=True).start()
 
     def _load_model(self):
-        """Load the sentence transformer model in background (downloads ~90MB on first run)."""
-        if SentenceTransformer is None:
-            print("[Nicky AI] sentence-transformers not installed. Using keyword fallback.")
-            print("           Run: pip install sentence-transformers  for the full AI experience.")
+        """Build TF-IDF index over all intent examples. No downloads, no GPU, fast."""
+        if not _SKLEARN_OK:
+            print("[Nicky AI] sklearn not found — using keyword fallback.")
+            print("           Run: pip install scikit-learn  for smarter NLU.")
             return
         try:
-            import numpy as _np
-            self._np = _np
-            self.model = SentenceTransformer('all-MiniLM-L6-v2')
-            self._build_index()
+            for intent, examples in self.INTENTS.items():
+                for ex in examples:
+                    self._all_examples.append(ex)
+                    self._all_labels.append(intent)
+            self._vectorizer = TfidfVectorizer(ngram_range=(1, 3), analyzer="word")
+            self._matrix = self._vectorizer.fit_transform(self._all_examples)
             self._model_ready = True
             print("[Nicky AI] ✅ Language model ready!")
         except Exception as e:
-            print(f"[Nicky AI] Could not load model ({e}). Using keyword fallback.")
-            self.model = None
-
-    def _build_index(self):
-        """Pre-encode all intent examples for fast matching at runtime."""
-        for intent, examples in self.INTENTS.items():
-            for ex in examples:
-                self._all_examples.append(ex)
-                self._all_labels.append(intent)
-        self._embeddings = self.model.encode(
-            self._all_examples, convert_to_numpy=True, show_progress_bar=False
-        )
+            print(f"[Nicky AI] NLU index failed ({e}). Using keyword fallback.")
 
     def predict(self, text):
         """Returns (intent_name, confidence_score 0-1). Falls back to keywords while model loads."""
-        if self.model is None or not self._model_ready:
+        if not self._model_ready or self._vectorizer is None:
             return self._keyword_fallback(text)
 
-        if not self._all_labels:
-            return "unknown", 0.0
-
-        vec = self.model.encode([text.lower()], convert_to_numpy=True)
-        num = self._np.dot(self._embeddings, vec.T).flatten()
-        denom = self._np.linalg.norm(self._embeddings, axis=1) * self._np.linalg.norm(vec) + 1e-8
-        sims = num / denom
-
-        best = int(self._np.argmax(sims))
+        vec = self._vectorizer.transform([text.lower()])
+        sims = cosine_similarity(vec, self._matrix).flatten()
+        best = int(sims.argmax())
         return self._all_labels[best], float(sims[best])
 
     def _keyword_fallback(self, text):
@@ -444,6 +465,14 @@ class NLUEngine:
             (["load", "recall"], "load"),
             (["voice on", "enable voice"], "voice_on"),
             (["voice off", "disable voice"], "voice_off"),
+            (["window", "open window", "show window"], "window_on"),
+            (["close window", "hide window"], "window_off"),
+            (["monitor on", "watch my screen", "monitor mode"], "monitor_on"),
+            (["monitor off", "stop watching", "stop monitoring"], "monitor_off"),
+            (["what do you see", "describe my screen", "look at my screen",
+              "what's on my screen", "check my screen", "what am i looking at"], "screen_look"),
+            (["proactive on", "be proactive", "speak up", "check in on me"], "proactive_on"),
+            (["proactive off", "stop talking randomly", "only talk when spoken to"], "proactive_off"),
             (["thank"], "thanks"),
             (["reset", "restart"], "reset"),
             (["how are you"], "how_are_you"),

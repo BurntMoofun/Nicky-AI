@@ -6,12 +6,17 @@ class OllamaClient:
     """Local LLM via Ollama — streaming, memory-aware answers for Nicky."""
 
     DEFAULT_MODEL = "llama3.2"
-    API_BASE = "http://localhost:11434"
     MAX_HISTORY = 20  # max messages kept in context (10 exchanges)
+
+    @property
+    def API_BASE(self):
+        return os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 
     def __init__(self):
         self.available = False
         self.model = self.DEFAULT_MODEL
+        self.vision_model = None   # set to e.g. "llava" if a vision model is found
+        self._stream_callback = None  # optional fn(token) called on each streamed token
         self._check_connection()
 
     def _check_connection(self):
@@ -31,10 +36,26 @@ class OllamaClient:
                             self.model = m
                             self.available = True
                             print(f"[Nicky AI] Ollama connected — using model: {self.model}")
-                            return
-                self.model = models[0]
-                self.available = True
-                print(f"[Nicky AI] Ollama connected — using model: {self.model}")
+                            break
+                    if self.available:
+                        break
+                if not self.available:
+                    self.model = models[0]
+                    self.available = True
+                    print(f"[Nicky AI] Ollama connected — using model: {self.model}")
+                # Detect best available vision model
+                _VISION_MODELS = ("moondream", "llava", "bakllava", "llama3.2-vision", "llava-llama3")
+                for vm in _VISION_MODELS:
+                    for m in models:
+                        if m.startswith(vm):
+                            self.vision_model = m
+                            break
+                    if self.vision_model:
+                        break
+                if self.vision_model:
+                    print(f"[Nicky AI] Vision model available: {self.vision_model}")
+                else:
+                    print("[Nicky AI] No vision model found. For screen monitor, run: ollama pull llava")
         except Exception:
             print("[Nicky AI] Ollama not detected — running without local LLM.")
             print("           Start Ollama and run: ollama pull llama3.2  to enable it.")
@@ -92,11 +113,49 @@ class OllamaClient:
                     if token:
                         print(token, end="", flush=True)
                         full_text += token
+                        if self._stream_callback:
+                            self._stream_callback(token)
                     if chunk.get("done"):
                         break
             print()  # newline after stream ends
             return full_text.strip() or None
         except Exception:
+            return None
+
+    def ask_with_image(self, prompt: str, image_b64: str,
+                       print_prefix: str = "[Nicky] ") -> str | None:
+        """Send a prompt + screenshot to an Ollama vision model (e.g. llava)."""
+        if not self.available:
+            return None
+        if not self.vision_model:
+            return None   # no vision model — let caller fall back or show error
+        import urllib.request
+        import json
+        try:
+            messages = [{"role": "user", "content": prompt, "images": [image_b64]}]
+            payload  = {"model": self.vision_model, "messages": messages, "stream": True}
+            data = json.dumps(payload).encode("utf-8")
+            req  = urllib.request.Request(
+                f"{self.API_BASE}/api/chat", data=data,
+                headers={"Content-Type": "application/json"}, method="POST")
+            full_text = ""
+            print(print_prefix, end="", flush=True)
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                for line in resp:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    chunk = json.loads(line.decode())
+                    token = chunk.get("message", {}).get("content", "")
+                    if token:
+                        print(token, end="", flush=True)
+                        full_text += token
+                    if chunk.get("done"):
+                        break
+            print()
+            return full_text.strip() or None
+        except Exception as e:
+            print(f"\n[Ollama Vision] Error: {e}")
             return None
 
 class GeminiClient:
@@ -109,10 +168,19 @@ class GeminiClient:
     def __init__(self):
         self.api_key = None
         self.available = False
+        self._stream_callback = None  # optional fn(token) for web streaming
         self._load_key()
 
     def _load_key(self):
         try:
+            # Check environment variable first (for cloud hosting)
+            import os as _os
+            env_key = _os.environ.get("GEMINI_API_KEY", "")
+            if env_key:
+                self.api_key = env_key
+                self.available = True
+                print(f"[Nicky AI] Gemini connected via env var — model: {self.MODEL}")
+                return
             if os.path.exists(self.CONFIG_PATH):
                 with open(self.CONFIG_PATH) as f:
                     config = json.load(f)
@@ -189,10 +257,60 @@ class GeminiClient:
                         if token:
                             print(token, end="", flush=True)
                             full_text += token
+                            if self._stream_callback:
+                                self._stream_callback(token)
                     except Exception:
                         continue
             print()
             return full_text.strip() or None
         except Exception as e:
             print(f"\n[Gemini] Error: {e}")
+            return None
+
+    def ask_with_image(self, prompt: str, image_b64: str,
+                       system_prompt: str = "",
+                       print_prefix: str = "[Nicky] ") -> str | None:
+        """Send a prompt + screenshot to Gemini vision. Returns streamed text."""
+        if not self.available:
+            return None
+        import urllib.request
+        try:
+            contents = [{"role": "user", "parts": [
+                {"text": prompt},
+                {"inline_data": {"mime_type": "image/jpeg", "data": image_b64}},
+            ]}]
+            payload = {"contents": contents}
+            if system_prompt:
+                payload["system_instruction"] = {"parts": [{"text": system_prompt}]}
+            data = json.dumps(payload).encode("utf-8")
+            url  = (f"{self.API_BASE}/{self.MODEL}:streamGenerateContent"
+                    f"?alt=sse&key={self.api_key}")
+            req  = urllib.request.Request(
+                url, data=data,
+                headers={"Content-Type": "application/json"}, method="POST")
+            full_text = ""
+            print(print_prefix, end="", flush=True)
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                for raw_line in resp:
+                    line = raw_line.decode("utf-8").strip()
+                    if not line.startswith("data: "):
+                        continue
+                    json_str = line[6:]
+                    if json_str == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(json_str)
+                        token = (chunk.get("candidates", [{}])[0]
+                                 .get("content", {})
+                                 .get("parts", [{}])[0]
+                                 .get("text", ""))
+                        if token:
+                            print(token, end="", flush=True)
+                            full_text += token
+                    except Exception:
+                        continue
+            print()
+            return full_text.strip() or None
+        except Exception as e:
+            print(f"\n[Gemini Vision] Error: {e}")
             return None

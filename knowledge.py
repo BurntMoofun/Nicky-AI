@@ -38,6 +38,10 @@ class KnowledgeBase:
             "what is a robot": "A robot is a machine designed to automatically carry out a complex series of actions, especially one programmable by a computer.",
             "what is a robotic arm": "A robotic arm is a type of mechanical arm that can perform tasks with precision and is often used in manufacturing and research.",
             "who are you": "I am Nicky, your robotic arm assistant AI.",
+            "who made you": "I was created by Moofun.",
+            "who created you": "I was created by Moofun.",
+            "who is your creator": "My creator is Moofun.",
+            "who built you": "I was built by Moofun.",
             "what can you do": "I can control robotic arms, see with cameras, understand multiple objects, and have intelligent conversations.",
             "how do robots work": "Robots use sensors to perceive their environment, processors to make decisions, and actuators to move.",
             "what is an algorithm": "An algorithm is a step-by-step procedure for solving a problem or accomplishing a task.",
@@ -311,9 +315,6 @@ class UserMemory:
                                     "going", "trying", "just", "also", "still", "really"):
             found["description"] = m.group(1).strip()
 
-        # "i am X years old" — not stored (privacy)
-        # "i live in X" / "i'm from X" — not stored (privacy)
-
         # "i'm building X" / "i'm working on X" / "my project is X"
         m = re.search(r"(?:i(?:'m| am) (?:building|working on|creating|making)|my project is) ([a-z][\w ]{2,40})", t, re.IGNORECASE)
         if m:
@@ -334,10 +335,73 @@ class UserMemory:
         if m:
             found.setdefault("hobbies", []).append(m.group(1).strip())
 
+        # "my favourite X is Y" / "my favorite X is Y"
+        m = re.search(r"my favou?rite ([a-z]+) is ([a-z][\w ]{1,30})", t, re.IGNORECASE)
+        if m:
+            found[f"favourite_{m.group(1).strip()}"] = m.group(2).strip()
+
+        # "i have a test / meeting / deadline / appointment [on/tomorrow/...]"
+        m = re.search(r"i have (?:a |an )?(test|exam|meeting|deadline|appointment|interview|presentation)([\w\s]{0,30})", t, re.IGNORECASE)
+        if m:
+            self._add_note(f"{m.group(1)}{m.group(2).rstrip()}")
+
+        # "i need to X" / "i have to X" — save as a note
+        m = re.search(r"i (?:need to|have to|must|should) ([a-z][\w ]{3,40})", t, re.IGNORECASE)
+        if m and not any(skip in m.group(1) for skip in ("say", "ask", "tell", "know", "find")):
+            self._add_note(f"needs to {m.group(1).strip()}")
+
+        # Named people: "my friend X" / "my brother X" etc.
+        m = re.search(r"my (friend|brother|sister|mum|mom|dad|father|mother|boyfriend|girlfriend|partner|boss|teacher|colleague) ([A-Z][a-z]+)", text)
+        if m:
+            rel, name = m.group(1), m.group(2)
+            people = self.facts.get("people", {})
+            people[name] = rel
+            found["people"] = people
+
         for key, value in found.items():
             self.learn(key, value)
 
         return found
+
+    def _add_note(self, note: str):
+        """Add a short-term note (capped at 10)."""
+        notes = self.facts.get("notes", [])
+        if note not in notes:
+            notes.append(note)
+        self.facts["notes"] = notes[-10:]
+        self.save()
+
+    def summarise(self) -> str:
+        """Return a human-readable summary of everything stored."""
+        if not self.facts:
+            return "I don't know much about you yet — tell me something!"
+        lines = []
+        if "name" in self.facts:
+            lines.append(f"👤 Name: {self.facts['name']}")
+        if "description" in self.facts:
+            lines.append(f"🏷️  You described yourself as: {self.facts['description']}")
+        if "project" in self.facts:
+            lines.append(f"🛠️  Project: {self.facts['project']}")
+        if "likes" in self.facts:
+            lines.append(f"❤️  Likes: {', '.join(self.facts['likes'])}")
+        if "dislikes" in self.facts:
+            lines.append(f"👎 Dislikes: {', '.join(self.facts['dislikes'])}")
+        if "hobbies" in self.facts:
+            lines.append(f"🎮 Hobbies: {', '.join(self.facts['hobbies'])}")
+        if "notes" in self.facts and self.facts["notes"]:
+            lines.append(f"📌 Notes: {'; '.join(self.facts['notes'])}")
+        if "people" in self.facts:
+            ppl = ", ".join(f"{n} ({r})" for n, r in self.facts["people"].items())
+            lines.append(f"👥 People you've mentioned: {ppl}")
+        for key, val in self.facts.items():
+            if key.startswith("favourite_"):
+                label = key.replace("favourite_", "").capitalize()
+                lines.append(f"⭐ Favourite {label}: {val}")
+        for key, val in self.facts.items():
+            if key not in ("name", "description", "project", "likes", "dislikes",
+                           "hobbies", "notes", "people") and not key.startswith("favourite_"):
+                lines.append(f"  • {key}: {val}")
+        return "\n".join(lines)
 
     def as_prompt_text(self):
         """Return a string summarising what Nicky knows about the user."""
@@ -356,7 +420,17 @@ class UserMemory:
             parts.append(f"They dislike: {', '.join(self.facts['dislikes'])}.")
         if "hobbies" in self.facts:
             parts.append(f"Their hobbies include: {', '.join(self.facts['hobbies'])}.")
+        if "notes" in self.facts and self.facts["notes"]:
+            parts.append(f"Recent notes about them: {'; '.join(self.facts['notes'])}.")
+        if "people" in self.facts:
+            ppl = ", ".join(f"{n} ({r})" for n, r in self.facts["people"].items())
+            parts.append(f"People they've mentioned: {ppl}.")
         for key, val in self.facts.items():
-            if key not in ("name", "description", "project", "likes", "dislikes", "hobbies"):
+            if key.startswith("favourite_"):
+                label = key.replace("favourite_", "")
+                parts.append(f"Their favourite {label} is {val}.")
+        for key, val in self.facts.items():
+            if key not in ("name", "description", "project", "likes", "dislikes",
+                           "hobbies", "notes", "people") and not key.startswith("favourite_"):
                 parts.append(f"{key}: {val}.")
         return "What you know about the user — " + " ".join(parts)

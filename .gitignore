@@ -32,6 +32,13 @@ test_audio.py
 test_features.py
 verify_syntax.py
 
+# Secrets / env vars
+.env
+*.env
+secrets.json
+
 # OS
 .DS_Store
 Thumbs.db
+desktop.ini
+*.lnk

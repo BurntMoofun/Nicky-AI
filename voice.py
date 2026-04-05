@@ -1,3 +1,4 @@
+import os
 try:
     import pyttsx3
     import speech_recognition as sr  # noqa: F401
@@ -15,6 +16,8 @@ class VoiceSystem:
         self.recognizer = None
         self._mic_available = False
         self._speaking = False  # True while TTS is playing — blocks mic
+        self._avatar = None    # AvatarWindow instance (optional)
+        self.load_voice_pref()  # restore saved voice choice
 
         # Text-to-speech
         if pyttsx3 is not None:
@@ -34,9 +37,75 @@ class VoiceSystem:
             except ImportError:
                 self._mic_available = False
 
-    # Neural voice to use — swap here to change Nicky's voice
-    # Other good options: "en-US-GuyNeural", "en-GB-SoniaNeural", "en-US-JennyNeural"
+    # Default neural voice — can be changed at runtime with "set voice"
     TTS_VOICE = "en-US-AriaNeural"
+
+    # Curated shortlist shown by "list voices"
+    VOICE_MENU = [
+        ("Aria",    "en-US-AriaNeural",      "US Female — warm, conversational (default)"),
+        ("Jenny",   "en-US-JennyNeural",     "US Female — friendly, clear"),
+        ("Guy",     "en-US-GuyNeural",       "US Male — neutral, professional"),
+        ("Sonia",   "en-GB-SoniaNeural",     "UK Female — crisp, articulate"),
+        ("Ryan",    "en-GB-RyanNeural",      "UK Male — relaxed, natural"),
+        ("Davis",   "en-US-DavisNeural",     "US Male — casual, young"),
+        ("Emma",    "en-US-EmmaNeural",      "US Female — expressive"),
+        ("Brian",   "en-US-BrianNeural",     "US Male — calm, deep"),
+    ]
+
+    def set_voice(self, name_or_num: str) -> str:
+        """Change TTS voice by name or menu number. Returns confirmation string."""
+        s = name_or_num.strip()
+        # Match by number
+        if s.isdigit():
+            idx = int(s) - 1
+            if 0 <= idx < len(self.VOICE_MENU):
+                label, voice_id, _ = self.VOICE_MENU[idx]
+                self.TTS_VOICE = voice_id
+                self._save_voice_pref(voice_id)
+                return f"Voice set to {label} ({voice_id})"
+            return f"Number out of range — pick 1–{len(self.VOICE_MENU)}"
+        # Match by label or voice ID (case-insensitive)
+        for label, voice_id, _ in self.VOICE_MENU:
+            if s.lower() in (label.lower(), voice_id.lower()):
+                self.TTS_VOICE = voice_id
+                self._save_voice_pref(voice_id)
+                return f"Voice set to {label} ({voice_id})"
+        # Accept any raw edge-tts voice ID directly
+        if "Neural" in name_or_num:
+            self.TTS_VOICE = name_or_num
+            self._save_voice_pref(name_or_num)
+            return f"Voice set to {name_or_num}"
+        return f"Unknown voice '{name_or_num}'. Type 'list voices' to see options."
+
+    def list_voices(self) -> str:
+        lines = ["Available voices (say 'set voice [number or name]'):"]
+        for i, (label, voice_id, desc) in enumerate(self.VOICE_MENU, 1):
+            marker = " ◀ current" if voice_id == self.TTS_VOICE else ""
+            lines.append(f"  {i}. {label:8} — {desc}{marker}")
+        return "\n".join(lines)
+
+    def _save_voice_pref(self, voice_id: str):
+        """Persist the chosen voice to nicky_data/config.json."""
+        import json as _json
+        path = os.path.join("nicky_data", "voice_config.json")
+        try:
+            os.makedirs("nicky_data", exist_ok=True)
+            with open(path, "w") as f:
+                _json.dump({"tts_voice": voice_id}, f)
+        except Exception:
+            pass
+
+    def load_voice_pref(self):
+        """Load saved voice preference on startup."""
+        import json as _json
+        path = os.path.join("nicky_data", "voice_config.json")
+        try:
+            if os.path.exists(path):
+                with open(path) as f:
+                    data = _json.load(f)
+                self.TTS_VOICE = data.get("tts_voice", self.TTS_VOICE)
+        except Exception:
+            pass
 
     def speak(self, text):
         """Convert text to speech — tries Edge TTS (neural) first, falls back to Windows SAPI."""
@@ -44,6 +113,8 @@ class VoiceSystem:
             return False
 
         self._speaking = True
+        if self._avatar:
+            self._avatar.notify_speaking(True, text)
         try:
             # Attempt 1: Edge TTS → soundfile → sounddevice
             try:
@@ -108,6 +179,8 @@ class VoiceSystem:
             import time
             time.sleep(0.6)  # brief cooldown so mic doesn't catch speaker output
             self._speaking = False
+            if self._avatar:
+                self._avatar.notify_speaking(False)
 
     def listen(self, max_duration=10, silence_threshold=200, silence_seconds=1.2):
         """Record mic using silence detection — stops when you stop talking."""
@@ -169,6 +242,10 @@ class VoiceSystem:
         except Exception as e:
             print(f"[Voice] Unexpected listen() error: {e}")
             return None
+
+    def set_avatar(self, avatar):
+        """Attach an AvatarWindow instance to animate during speech."""
+        self._avatar = avatar
 
     def enable_voice(self):
         """Turn on voice output + input mode."""

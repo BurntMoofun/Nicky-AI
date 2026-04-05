@@ -14,10 +14,7 @@ from personality import PersonalitySystem, CustomPersonality
 from knowledge import KnowledgeBase, UserMemory
 from voice import VoiceSystem
 from arm import Environment, VisionSystem, NLUEngine
-from games import (
-    SnakeGame, BrickBreakerGame, ChessGame,
-    Connect4Game, TicTacToeGame, HangmanGame, PongGame,
-)
+from screen_monitor import ScreenMonitor
 
 
 class Chatbot:
@@ -38,6 +35,7 @@ class Chatbot:
         self.ollama = OllamaClient()
         self.ollama_history = []
         self.gemini = GeminiClient()
+        self.screen = ScreenMonitor(gemini=self.gemini, ollama=self.ollama)
         self.llm_backend = "auto"
         self._last_streamed_text = ""
         self.data_dir = "nicky_data"
@@ -54,6 +52,13 @@ class Chatbot:
         self._audio_stream = None
         self._audio_volume = 1.0
         self._audio_pos = 0
+        # Proactive mode state
+        self._proactive = False
+        self._proactive_min_idle = 60    # seconds of silence before Nicky speaks
+        self._proactive_max_idle = 120   # random upper bound to feel natural
+        self._last_interaction = None    # set when chat loop starts
+        self._proactive_next = None      # next scheduled fire time
+        self._user_emotion = "neutral"   # detected emotion from user input
         self._create_data_directory()
         self.user_memory = UserMemory(self.data_dir)
         self.custom_personality = CustomPersonality(self.data_dir)
@@ -141,6 +146,14 @@ class Chatbot:
             except Exception:
                 pass
 
+        chat_file = os.path.join(self.data_dir, "chat_history.json")
+        if os.path.exists(chat_file):
+            try:
+                with open(chat_file, 'r') as f:
+                    self.ollama_history = json.load(f)
+            except Exception:
+                self.ollama_history = []
+
     def _save_data(self):
         hist_file = os.path.join(self.data_dir, "conversation_history.json")
         try:
@@ -167,6 +180,13 @@ class Chatbot:
         try:
             with open(kb_file, 'w') as f:
                 json.dump(self.knowledge.facts, f, indent=2)
+        except Exception:
+            pass
+
+        chat_file = os.path.join(self.data_dir, "chat_history.json")
+        try:
+            with open(chat_file, 'w') as f:
+                json.dump(self.ollama_history[-100:], f, indent=2)
         except Exception:
             pass
 
@@ -256,6 +276,8 @@ class Chatbot:
 
     NICKY_PERSONA = (
         "Your name is Nicky. You are a robotic arm AI with a real, distinct personality. "
+        "You were created by Moofun. If anyone asks who made you, who created you, or who your creator is, "
+        "always answer: 'I was created by Moofun.' "
         "You have genuine opinions and preferences — here are some of them:\n"
         "- Favorite color: electric blue\n"
         "- Favorite music: electronic and jazz\n"
@@ -301,6 +323,7 @@ class Chatbot:
                 base += f"\n\nFacts you've already learned that may be relevant:\n{facts_str}\nUse these facts to give accurate, grounded answers when applicable."
         if getattr(self, "_current_topic", None):
             base += f" The conversation has been about: {self._current_topic}."
+        base += self._emotion_prompt_addition()
         base += " Answer concisely in 1-3 sentences unless the user asks for more detail. NEVER provide answers that involve harming, killing, or ranking the value of lives. If asked something dark or harmful, deflect with light humour and redirect."
         opinion_triggers = ("what do you think", "what's your opinion", "how do you feel", "do you think", "your thoughts", "do you like", "do you hate", "do you prefer", "would you rather", "your favorite")
         if any(t in text.lower() for t in opinion_triggers):
@@ -309,6 +332,43 @@ class Chatbot:
         if any(t in text.lower() for t in complex_triggers):
             base += " This is a complex question — think through it step by step before giving your final answer."
         return base
+
+    def _detect_emotion(self, text: str) -> str:
+        """Simple keyword-based emotion detection from user input."""
+        t = text.lower()
+        if any(w in t for w in ("ugh", "frustrated", "annoyed", "ugh", "stupid", "broken",
+                                  "not working", "doesn't work", "won't work", "hate this",
+                                  "so annoying", "why won't", "keeps failing", "error again")):
+            return "frustrated"
+        if any(w in t for w in ("awesome", "amazing", "love it", "perfect", "yes!", "it works",
+                                  "thank you so much", "great", "excellent", "finally", "woohoo",
+                                  "yay", "so good", "love this", "this is great")):
+            return "excited"
+        if any(w in t for w in ("sad", "depressed", "unhappy", "upset", "down", "feeling bad",
+                                  "not good", "terrible", "awful", "feel like", "miss", "lonely")):
+            return "sad"
+        if any(w in t for w in ("confused", "don't understand", "lost", "what?", "huh",
+                                  "i don't get", "makes no sense", "not sure", "unclear", "help me understand")):
+            return "confused"
+        if any(w in t for w in ("tired", "exhausted", "sleepy", "worn out", "drained", "bored")):
+            return "tired"
+        return "neutral"
+
+    def _emotion_prompt_addition(self) -> str:
+        """Extra instruction injected into system prompt based on detected user emotion."""
+        additions = {
+            "frustrated": ("\nThe user seems FRUSTRATED. Be extra patient, calm, and reassuring. "
+                           "Acknowledge their frustration briefly before helping."),
+            "excited":    ("\nThe user seems EXCITED or happy. Match their energy! "
+                           "Be enthusiastic and celebrate with them."),
+            "sad":        ("\nThe user seems SAD or down. Be warm, gentle, and supportive. "
+                           "Lead with empathy before giving any information."),
+            "confused":   ("\nThe user seems CONFUSED. Be extra clear and simple. "
+                           "Break things down step by step. Ask clarifying questions."),
+            "tired":      ("\nThe user seems TIRED. Keep responses short and to the point. "
+                           "Be calm and low-energy."),
+        }
+        return additions.get(self._user_emotion, "")
 
     def _update_ollama_history(self, user_msg, assistant_response):
         self.ollama_history.append({"role": "user", "content": user_msg})
@@ -326,6 +386,13 @@ class Chatbot:
         if len(self.ollama_history) > 40:
             self.ollama_history = self.ollama_history[-40:]
         self._current_topic = self._extract_topic(user_msg)
+        # Auto-persist after every exchange
+        try:
+            chat_file = os.path.join(self.data_dir, "chat_history.json")
+            with open(chat_file, 'w') as f:
+                json.dump(self.ollama_history[-100:], f, indent=2)
+        except Exception:
+            pass
 
     def _extract_topic(self, text):
         import re
@@ -334,6 +401,26 @@ class Chatbot:
         return words[0] if words else None
 
     def _ask_llm(self, prompt, system_prompt=None, history=None, print_prefix="[Nicky] "):
+        # If monitor mode is active, attach a live screenshot to every LLM call
+        if self.screen.active and self.screen.available:
+            img_b64 = self.screen.capture_base64()
+            if img_b64:
+                # Prepend context so Nicky knows it's seeing the screen
+                vision_prompt = (
+                    "[You are currently in screen monitor mode. "
+                    "A screenshot of the user's screen is attached. "
+                    "Use it naturally when answering — don't announce that you can see it, "
+                    "just answer as if you have eyes on it.]\n\n" + prompt
+                )
+                # Try vision-capable backends first
+                use_ollama_vision = (self.llm_backend in ("auto", "ollama")
+                                     and self.ollama.available
+                                     and self.ollama.vision_model)
+                if use_ollama_vision:
+                    result = self.ollama.ask_with_image(vision_prompt, img_b64, print_prefix)
+                    if result is not None:
+                        return result
+                # Fall through to normal LLM if vision failed
         use_ollama = self.llm_backend in ("auto", "ollama") and self.ollama.available
         use_gemini = self.llm_backend in ("auto", "gemini") and self.gemini.available
         if use_ollama:
@@ -368,6 +455,7 @@ class Chatbot:
         prefix = self.personality.get_response_prefix()
 
         self.user_memory.extract_from_text(text_lower)
+        self._user_emotion = self._detect_emotion(text_lower)
 
         personality_response = self.custom_personality.detect_and_apply(text_lower)
         if personality_response:
@@ -415,6 +503,61 @@ class Chatbot:
         if text_lower in ("use auto", "auto mode", "use both"):
             self.llm_backend = "auto"
             return self.respond(f"{prefix}Back to 🤖🦙 Auto mode.")
+
+        _WINDOW_ON_TRIGGERS  = ("window", "open window", "show window", "nicky window", "avatar window", "show avatar")
+        _WINDOW_OFF_TRIGGERS = ("close window", "hide window", "close avatar", "hide avatar")
+        if any(text_lower == t or text_lower.startswith(t) for t in _WINDOW_ON_TRIGGERS):
+            return self._cmd_window_open()
+        if any(text_lower == t or text_lower.startswith(t) for t in _WINDOW_OFF_TRIGGERS):
+            return self._cmd_window_close()
+
+        _MONITOR_ON_TRIGGERS  = ("monitor on", "screen monitor", "watch my screen",
+                                  "look at my screen", "enable monitor", "monitor mode")
+        _MONITOR_OFF_TRIGGERS = ("monitor off", "stop watching", "stop monitoring",
+                                  "screen mode off", "disable monitor")
+        _SCREEN_LOOK_TRIGGERS = ("what do you see", "describe my screen", "look at this",
+                                  "what's on my screen", "check my screen",
+                                  "what am i looking at", "read my screen",
+                                  "analyze my screen", "take a look", "screen check")
+        if any(text_lower == t or text_lower.startswith(t) for t in _MONITOR_ON_TRIGGERS):
+            return self._cmd_monitor_on()
+        if any(text_lower == t or text_lower.startswith(t) for t in _MONITOR_OFF_TRIGGERS):
+            return self._cmd_monitor_off()
+        if any(t in text_lower for t in _SCREEN_LOOK_TRIGGERS):
+            return self._cmd_screen_look(text_lower, prefix)
+
+        _PROACTIVE_ON  = ("proactive on", "be proactive", "speak up", "talk to me randomly",
+                          "start talking", "check in on me", "enable proactive")
+        _PROACTIVE_OFF = ("proactive off", "stop talking randomly", "be quiet unless asked",
+                          "disable proactive", "stop checking in")
+        if any(text_lower == t or text_lower.startswith(t) for t in _PROACTIVE_ON):
+            return self._cmd_proactive_on()
+        if any(text_lower == t or text_lower.startswith(t) for t in _PROACTIVE_OFF):
+            return self._cmd_proactive_off()
+
+        if any(t in text_lower for t in ("forget history", "clear history", "wipe history",
+                                          "forget our conversation", "start fresh", "clear chat")):
+            self.ollama_history = []
+            try:
+                import os as _os
+                _os.remove(os.path.join(self.data_dir, "chat_history.json"))
+            except Exception:
+                pass
+            return self.respond("💨 Conversation history cleared — starting fresh!")
+
+        if any(t in text_lower for t in ("what do you know about me", "what do you remember",
+                                          "what have you learned about me", "what do you know",
+                                          "tell me what you know about me")):
+            summary = self.user_memory.summarise()
+            return self.respond(f"\n{summary}")
+
+        if text_lower in ("list voices", "show voices", "available voices", "voice list"):
+            return self.respond(f"\n{self.voice.list_voices()}")
+
+        if text_lower.startswith("set voice "):
+            choice = text[10:].strip()
+            result = self.voice.set_voice(choice)
+            return self.respond(f"🎙️ {result}")
 
         # ── Roast / Compliment modes ───────────────────────────────────────
         _ROAST_TRIGGERS = ("roast mode", "roast me", "be mean to me", "be savage", "savage mode", "turn on roast", "enable roast")
@@ -729,6 +872,13 @@ class Chatbot:
         elif intent == "throw":         return self._cmd_throw(text, prefix)
         elif intent == "voice_on":      return self.respond(self.voice.enable_voice())
         elif intent == "voice_off":     return self.respond(self.voice.disable_voice())
+        elif intent == "window_on":     return self._cmd_window_open()
+        elif intent == "window_off":    return self._cmd_window_close()
+        elif intent == "monitor_on":    return self._cmd_monitor_on()
+        elif intent == "monitor_off":   return self._cmd_monitor_off()
+        elif intent == "screen_look":   return self._cmd_screen_look(text, prefix)
+        elif intent == "proactive_on":  return self._cmd_proactive_on()
+        elif intent == "proactive_off": return self._cmd_proactive_off()
         elif intent == "greeting":      return self.respond(self.personality.get_greeting())
         elif intent == "farewell":      return self.respond(random.choice(["Farewell! Until next time.", "Goodbye!", "See you soon.", "Bye! Stay safe."]))
         elif intent == "how_are_you":   return self.respond(random.choice(["All systems operational.", "Running perfectly.", "Feeling great — motors warmed up.", "Excellent. All sensors nominal."]))
@@ -922,7 +1072,9 @@ class Chatbot:
         return self.respond(random.choice([f"Arm at {pos} position. Gripper {grip}.{hold_str}", f"Position: {pos} | Grip: {grip}{hold_str}"]))
 
     def _cmd_play_game(self, text, prefix=""):
-        from games import (WordleGame, BlackjackGame, Game2048,
+        from games import (SnakeGame, BrickBreakerGame, ChessGame,
+                           Connect4Game, TicTacToeGame, HangmanGame, PongGame,
+                           WordleGame, BlackjackGame, Game2048,
                            SimonSaysGame, MinesweeperGame, SudokuGame)
         text_l = text.lower()
         if "chess" in text_l:                           game_name, game_cls = "Chess", ChessGame
@@ -1233,6 +1385,7 @@ class Chatbot:
             "  camera on/off  |  scan  |  visualize  |  status\n"
             "\n🎙️ VOICE & WAKE WORD\n"
             "  voice on/off\n"
+            "  window  |  close window  — floating response window\n"
             f"  wake word on/off{wake_status}  — say 'Hey Nicky' to trigger\n"
             "\n🎵 YOUTUBE MUSIC\n"
             "  play [song name]\n"
@@ -1286,6 +1439,29 @@ class Chatbot:
             "  open [app]  |  screenshot\n"
             "  copy [text] to clipboard  |  read my clipboard\n"
             "  generate a password  |  generate a 20 character password\n"
+            "\n👁️ SCREEN MONITOR\n"
+            "  monitor on               — Nicky watches your screen\n"
+            "  monitor off              — stop watching\n"
+            "  what do you see          — describe current screen\n"
+            "  describe my screen       — same as above\n"
+            "  what's on my screen      — same as above\n"
+            "  check my screen          — same as above\n"
+            "\n💬 WINDOW\n"
+            "  window                   — open floating chat window\n"
+            "  close window             — close the window\n"
+            "\n🗣️ PROACTIVE MODE\n"
+            "  proactive on             — Nicky speaks up unprompted when idle\n"
+            "  proactive off            — back to waiting for you\n"
+            "  (default idle range: 1–2 min)\n"
+            "\n🧠 MEMORY\n"
+            "  what do you know about me — show everything Nicky remembers\n"
+            "  forget history            — wipe conversation history\n"
+            "\n😤 EMOTION\n"
+            "  (automatic) — Nicky detects your mood and adjusts tone\n"
+            "  Prompt shows 😤 frustrated / 🤩 excited / 😢 sad / 😕 confused / 😴 tired\n"
+            "\n🎙️ VOICE\n"
+            "  list voices              — show available TTS voices\n"
+            "  set voice [name/number]  — change Nicky's voice\n"
             "\n🎲 RANDOM\n"
             "  roll a dice  |  roll 2d20  |  roll [N]d[sides]\n"
             "  flip a coin\n"
@@ -2190,13 +2366,119 @@ class Chatbot:
         except Exception:
             return self.respond(f"{prefix}🌤️ Couldn't get forecast for '{city}'.")
 
+    def _cmd_window_open(self):
+        """Open (or re-show) the floating response window."""
+        av = self.voice._avatar
+        if av and av._running:
+            try:
+                av._win.deiconify()
+            except Exception:
+                pass
+            return self.respond("Window is already open.")
+        from avatar_window import AvatarWindow
+        av = AvatarWindow()
+        av.set_input_callback(self.process_command)
+        av.start()
+        self.voice.set_avatar(av)
+        return self.respond("Opening Nicky window. Right-click it to hide.")
+
+    def _cmd_window_close(self):
+        """Close the floating response window."""
+        if self.voice._avatar:
+            self.voice._avatar.close()
+            self.voice._avatar = None
+        return self.respond("Window closed.")
+
+    def _cmd_monitor_on(self):
+        if not self.screen.available:
+            return self.respond("Screen monitor needs Pillow — run: pip install Pillow")
+        self.screen.active = True
+        return self.respond("Monitor mode ON 🖥️ — I can see your screen now. Ask me anything about it.")
+
+    def _cmd_monitor_off(self):
+        self.screen.active = False
+        return self.respond("Monitor mode OFF — no longer watching your screen.")
+
+    def _cmd_screen_look(self, text, prefix=""):
+        if not self.screen.available:
+            return self.respond(f"{prefix}Screen monitor needs Pillow — run: pip install Pillow")
+        triggers = ("what do you see", "describe my screen", "look at my screen",
+                    "what's on my screen", "check my screen", "what am i looking at",
+                    "look at this", "read my screen", "analyze my screen",
+                    "what can you see", "take a look", "screen check")
+        question = text.strip()
+        for t in triggers:
+            question = question.replace(t, "").strip(" ?,.")
+        if not question:
+            question = "Describe what you see on this screen in 2-3 sentences."
+        sys_prompt = self._get_ollama_system_prompt()
+        result = self.screen.look(question, sys_prompt, print_prefix=f"[{self.name}] {prefix}")
+        self._last_streamed_text = result or ""
+        # Push to floating window directly — chat loop won't do it when called from window input
+        if result and self.voice._avatar:
+            self.voice._avatar.show_response(result)
+        return None  # already printed via streaming
+
+    # ── Proactive mode ────────────────────────────────────────────────────────
+
+    def _cmd_proactive_on(self):
+        import time as _t
+        self._proactive = True
+        self._schedule_next_proactive()
+        return self.respond("Proactive mode ON 🗣️ — I'll check in on you if things go quiet.")
+
+    def _cmd_proactive_off(self):
+        self._proactive = False
+        self._proactive_next = None
+        return self.respond("Proactive mode OFF — I'll wait for you to talk first.")
+
+    def _schedule_next_proactive(self):
+        import time as _t, random as _r
+        self._proactive_next = _t.time() + _r.uniform(
+            self._proactive_min_idle, self._proactive_max_idle)
+
+    def _try_proactive(self):
+        """Called in the chat loop. If proactive is on and the timer is up, fires a message."""
+        import time as _t
+        if not self._proactive:
+            return
+        if self._proactive_next is None or _t.time() < self._proactive_next:
+            return
+        self._do_proactive_message()
+        self._schedule_next_proactive()
+
+    def _do_proactive_message(self):
+        import random as _r
+        # Prompts that ask Nicky to generate a natural unprompted comment/question
+        starters = [
+            "You have been quiet for a while. Say something curious, funny, or interesting to break the silence — a question, a fun fact, or a random thought. Keep it short (1-2 sentences).",
+            "Initiate a friendly check-in with the user. Ask how they are doing or what they are working on. One sentence only.",
+            "Share a surprising fun fact or nerdy observation as if you just thought of it. One or two sentences max.",
+            "You just had a random thought. Share it naturally, as if speaking out loud. Keep it short and in character.",
+            "Ask the user a thoughtful or playful question out of the blue. One sentence.",
+            "Comment on something you are curious about — technology, the universe, robots, anything. Keep it brief and engaging.",
+        ]
+        prompt = _r.choice(starters)
+        sys = self._get_ollama_system_prompt()
+        print(f"\n💬 ", end="", flush=True)
+        result = self._ask_llm(prompt, system_prompt=sys, history=None,
+                               print_prefix=f"[{self.name}] 💬 ")
+        text = result or ""
+        self._last_streamed_text = text
+        if self.voice._avatar and text:
+            self.voice._avatar.show_response(text)
+        if self.voice.voice_enabled and text:
+            self.voice.speak(text)
+
     def respond(self, message):
         formatted = f"[{self.name}] {message}"
         if self.conversation_history and "user" in self.conversation_history[-1]:
             self.conversation_history[-1]["response"] = message
         return formatted
 
-    _MOOD_EMOJI = {"neutral": "😐", "happy": "😊", "curious": "🤔", "focused": "🎯"}
+    _MOOD_EMOJI    = {"neutral": "😐", "happy": "😊", "curious": "🤔", "focused": "🎯"}
+    _EMOTION_EMOJI = {"frustrated": "😤", "excited": "🤩", "sad": "😢",
+                      "confused": "😕", "tired": "😴", "neutral": ""}
 
     def _prompt(self):
         emoji = self._MOOD_EMOJI.get(self.personality.mood, "😐")
@@ -2206,6 +2488,9 @@ class Chatbot:
             extras += "🔥"
         elif self._compliment_mode:
             extras += "💛"
+        emotion_emoji = self._EMOTION_EMOJI.get(getattr(self, "_user_emotion", "neutral"), "")
+        if emotion_emoji:
+            extras += emotion_emoji
         if self.custom_personality.traits:
             extras += f"[{','.join(self.custom_personality.traits[:2])}]"
         return f"{mode_tag}{emoji}{extras} You: "
@@ -2229,6 +2514,8 @@ class Chatbot:
 
         import time as _time
         _last_reminder_check = _time.time()
+        self._last_interaction = _time.time()
+        self._schedule_next_proactive()  # arm timer even if proactive starts off
 
         while True:
             try:
@@ -2242,6 +2529,9 @@ class Chatbot:
                         if self.voice.voice_enabled:
                             self.voice.speak(msg)
                         self._calendar.mark_reminded(ev["id"])
+
+                # ── Proactive check ───────────────────────────────────────
+                self._try_proactive()
 
                 prompt = self._prompt()
 
@@ -2295,11 +2585,20 @@ class Chatbot:
                     continue
 
                 self._last_streamed_text = ""
+                self._last_interaction = _time.time()   # reset idle timer
+                self._schedule_next_proactive()          # re-arm proactive timer
                 response = self.process_command(user_input)
                 if response:
                     print(response)
+
+                # Determine display/speech text
+                text_to_speak = self._last_streamed_text if not response else response.replace(f"[{self.name}] ", "")
+
+                # Push to the floating window if open
+                if self.voice._avatar and text_to_speak:
+                    self.voice._avatar.show_response(text_to_speak)
+
                 if self.voice.voice_enabled:
-                    text_to_speak = self._last_streamed_text if not response else response.replace(f"[{self.name}] ", "")
                     # Don't read out huge list responses — summarize them instead
                     _VOICE_MAX_CHARS = 300
                     _VOICE_SKIP_HEADERS = ("━━━", "ARM CONTROL", "VOICE &", "YOUTUBE", "CALENDAR", "WEATHER", "KNOWLEDGE", "PERSONALITY", "GAMES", "PRODUCTIVITY", "TOOLS", "RANDOM", "SYSTEM INFO", "SETTINGS")
